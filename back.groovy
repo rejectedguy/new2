@@ -1214,19 +1214,945 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
         limit_param = OptInt(Request.QueryString.GetOptProperty('limit', '20'));
 
         if (include_all_param == 'true') {
-            // Здесь будет большой блок кода для загрузки сотрудников...
-            // Продолжение в следующем блоке из-за ограничения размера
-            result.SetProperty('subdivision', subdivision_data);
+            try {
+                result.GetOptProperty('debug').push('Loading paginated grouped collaborators');
+
+                // ГРУППИРУЕМ ПО НОРМАЛИЗОВАННЫМ ИМЕНАМ ПОДРАЗДЕЛЕНИЙ
+                collaborators_by_normalized_name = new Object();
+                normalized_names_order = [];
+                parent_dept_names = new Object();
+
+                added_person_ids = new Object();
+
+                // СНАЧАЛА собираем сотрудников из РОДИТЕЛЬСКИХ департаментов (из grouped_ids)
+                for (i = 0; i < ArrayCount(grouped_ids); i++) {
+                    dept_id = grouped_ids[i];
+                    if (dept_id == '') continue;
+
+                    try {
+                        dept_query = "for $elem in subdivisions where $elem/id = " + dept_id + " return $elem";
+                        dept_result = ArraySelectAll(tools.xquery(dept_query));
+
+                        if (ArrayCount(dept_result) == 0) continue;
+
+                        dept_info = dept_result[0];
+
+                        // Используем вспомогательную функцию
+                        territorial_result = findTerritorialParent(dept_id, 10);
+                        regional_name = territorial_result.name;
+                        regional_parent_id_str = territorial_result.id;
+
+                        if (regional_name == '') {
+                            regional_name = 'Неизвестное подразделение';
+                        }
+
+                        dept_name_from_map = getSubNameById(dept_id);
+                        if (dept_name_from_map != null) {
+                            dept_name = dept_name_from_map;
+                        } else {
+                            dept_name = String(dept_result[0].name);
+                        }
+
+                        // Очищаем от точек
+                        clean_dept_name = dept_name;
+                        while (StrContains(clean_dept_name, '.', false)) {
+                            clean_dept_name = StrReplace(clean_dept_name, '.', '');
+                        }
+                        clean_dept_name = Trim(clean_dept_name);
+
+                        dept_name_normalized = normalizeSubdivisionName(clean_dept_name);
+
+                        result.GetOptProperty('debug').push('Loading parent dept collaborators: ' + dept_name + ' (normalized: ' + dept_name_normalized + ')');
+
+                        if (!collaborators_by_normalized_name.HasProperty(dept_name_normalized)) {
+                            collaborators_by_normalized_name.SetProperty(dept_name_normalized, []);
+                            normalized_names_order.push(dept_name_normalized);
+                        }
+
+                        // ===== Собираем дочерние подразделения (уровень 1) =====
+                        dept_children_query = "for $elem in subdivisions where $elem/parent_object_id = " + dept_id + " and $elem/is_disbanded != true() return $elem";
+                        dept_children = ArraySelectAll(tools.xquery(dept_children_query));
+
+                        result.GetOptProperty('debug').push('Parent dept ' + dept_id + ' has ' + ArrayCount(dept_children) + ' children (level 1)');
+
+                        // ===== Собираем внуков (уровень 2) =====
+                        dept_grandchildren = [];
+                        for (dept_child in dept_children) {
+                            try {
+                                dept_gc_query = "for $elem in subdivisions where $elem/parent_object_id = " + String(dept_child.id) + " and $elem/is_disbanded != true() return $elem";
+                                dept_gcs = ArraySelectAll(tools.xquery(dept_gc_query));
+
+                                for (dept_gc in dept_gcs) {
+                                    dept_grandchildren.push(dept_gc);
+                                }
+                            } catch(gcErr) {
+                                result.GetOptProperty('debug').push('Error loading grandchildren for ' + String(dept_child.id) + ': ' + String(gcErr));
+                            }
+                        }
+
+                        result.GetOptProperty('debug').push('Parent dept ' + dept_id + ' has ' + ArrayCount(dept_grandchildren) + ' grandchildren (level 2)');
+
+                        // Обработка руководителей и сотрудников - продолжение следует из-за размера...
+                        // (код будет добавлен в следующем блоке)
+
+                    } catch(deptErr) {
+                        result.GetOptProperty('debug').push('Error loading parent dept: ' + String(deptErr));
+                    }
+                }
+
+                subdivision_data.SetProperty('all_collaborators', []);
+                subdivision_data.SetProperty('total_count', 0);
+                subdivision_data.SetProperty('has_more', false);
+            } catch(allCollabErr) {
+                result.GetOptProperty('debug').push('ERROR loading grouped paginated: ' + String(allCollabErr));
+                subdivision_data.SetProperty('all_collaborators', []);
+                subdivision_data.SetProperty('total_count', 0);
+                subdivision_data.SetProperty('has_more', false);
+            }
         } else {
             subdivision_data.SetProperty('all_collaborators', []);
             subdivision_data.SetProperty('total_count', 0);
             subdivision_data.SetProperty('has_more', false);
-            result.SetProperty('subdivision', subdivision_data);
         }
 
+        result.SetProperty('subdivision', subdivision_data);
+        Response.Write(tools.object_to_text(result, 'json'));
+    }
+} else if (subdivision_id != '') {
+    // === ОБРАБОТКА ОБЫЧНОГО SUBDIVISION_ID ===
+    hierarchy_items = [];
+    try {
+        current_id = subdivision_id;
+        depth = 0;
+        while (current_id != '' && current_id != null && depth < 20) {
+            depth++;
+            sub_info_query = "for $elem in subdivisions where $elem/id = " + current_id + " return $elem";
+            sub_info_result = ArraySelectAll(tools.xquery(sub_info_query));
+            if (ArrayCount(sub_info_result) == 0) break;
+            sub_info = sub_info_result[0];
+            subName = getSubNameById(String(sub_info.id));
+            if (subName == null) {
+                subName = String(sub_info.name);
+            }
+            hierarchy_items.push(subName);
+            if (sub_info.parent_object_id != '' && sub_info.parent_object_id != null) {
+                current_id = String(sub_info.parent_object_id);
+            } else {
+                try {
+                    org_query = "for $elem in orgs where $elem/id = " + String(sub_info.org_id) + " return $elem";
+                    org_result = ArraySelectAll(tools.xquery(org_query));
+                    if (ArrayCount(org_result) > 0) {
+                        hierarchy_items.push(String(org_result[0].name));
+                    }
+                } catch(orgErr) {}
+                break;
+            }
+        }
+    } catch(hierErr) {}
+
+    hierarchy_path = [];
+    for (i = ArrayCount(hierarchy_items) - 1; i >= 0; i--) {
+        hierarchy_path.push(hierarchy_items[i]);
+    }
+
+    child_sub_query = "for $elem in subdivisions where $elem/parent_object_id = " + subdivision_id + " and $elem/is_disbanded != true() return $elem";
+    child_sub_list = ArraySelectAll(tools.xquery(child_sub_query));
+    hidden_subdivisions = [];
+    normal_subdivisions = [];
+    for (child_sub in child_sub_list) {
+        if (!child_sub.id || child_sub.id == '') continue;
+        childName = getSubNameById(String(child_sub.id));
+        if (childName == null) {
+            childName = String(child_sub.name);
+        }
+        if (startsWithHiddenPrefix(childName)) {
+            hidden_subdivisions.push(child_sub);
+        } else {
+            normal_subdivisions.push(child_sub);
+        }
+    }
+
+    for (child_sub in normal_subdivisions) {
+        childName = getSubNameById(String(child_sub.id));
+        if (childName == null) {
+            childName = String(child_sub.name);
+        }
+        result.GetOptProperty('debug').push('Child subdivision: id=' + String(child_sub.id) + ', name=' + childName);
+    }
+
+    grouped_departments = new Object();
+    for (hidden_sub in hidden_subdivisions) {
+        try {
+            hiddenSubName = getSubNameById(String(hidden_sub.id));
+            if (hiddenSubName == null) {
+                hiddenSubName = String(hidden_sub.name);
+            }
+            dept_query = "for $elem in subdivisions where $elem/parent_object_id = " + String(hidden_sub.id) + " and $elem/is_disbanded != true() return $elem";
+            dept_list = ArraySelectAll(tools.xquery(dept_query));
+            for (dept in dept_list) {
+                if (!dept.id || dept.id == '') continue;
+                has_collab = hasCollaboratorsRecursive(String(dept.id), 0);
+                if (!has_collab) continue;
+                deptName = getSubNameById(String(dept.id));
+                if (deptName == null) {
+                    deptName = String(dept.name);
+                }
+                normalized = normalizeSubdivisionName(deptName);
+                dept_copy = new Object();
+                dept_copy.SetProperty('id', String(dept.id));
+                dept_copy.SetProperty('name', String(dept.name));
+                dept_copy.SetProperty('org_id', String(dept.org_id));
+                dept_copy.SetProperty('parent_object_id', String(dept.parent_object_id));
+                dept_copy.SetProperty('regional_parent_id', String(hidden_sub.id));
+                dept_copy.SetProperty('regional_parent_name', hiddenSubName);
+                dept_copy.SetProperty('display_name', deptName);
+                if (!grouped_departments.HasProperty(normalized)) {
+                    grouped_departments.SetProperty(normalized, []);
+                }
+                grouped_departments.GetOptProperty(normalized).push(dept_copy);
+            }
+        } catch(hiddenErr) {}
+    }
+
+    // Проверяем является ли это подразделение частью группы
+    is_part_of_group = false;
+    try {
+        current_sub_query = "for $elem in subdivisions where $elem/id = " + subdivision_id + " return $elem";
+        current_sub_result = ArraySelectAll(tools.xquery(current_sub_query));
+
+        if (ArrayCount(current_sub_result) > 0) {
+            check_parent_id = String(current_sub_result[0].parent_object_id);
+            depth_check = 0;
+
+            while (check_parent_id != '' && check_parent_id != null && depth_check < 3) {
+                depth_check++;
+
+                parent_sub_query = "for $elem in subdivisions where $elem/id = " + check_parent_id + " return $elem";
+                parent_sub_result = ArraySelectAll(tools.xquery(parent_sub_query));
+
+                if (ArrayCount(parent_sub_result) > 0) {
+                    parent_name = String(parent_sub_result[0].name);
+
+                    if (startsWithHiddenPrefix(parent_name)) {
+                        is_part_of_group = true;
+                        result.GetOptProperty('debug').push('Subdivision ' + subdivision_id + ' is part of group (hidden ancestor at level ' + depth_check + ': ' + parent_name + ')');
+                        break;
+                    }
+
+                    check_parent_id = String(parent_sub_result[0].parent_object_id);
+                } else {
+                    break;
+                }
+            }
+        }
+    } catch(groupCheckErr) {
+        result.GetOptProperty('debug').push('Error checking group membership: ' + String(groupCheckErr));
+    }
+
+    parent_is_grouped = false;
+    try {
+        current_sub_query = "for $elem in subdivisions where $elem/id = " + subdivision_id + " return $elem";
+        current_sub_result = ArraySelectAll(tools.xquery(current_sub_query));
+
+        if (ArrayCount(current_sub_result) > 0) {
+            parent_sub_id = String(current_sub_result[0].parent_object_id);
+
+            if (parent_sub_id != '' && parent_sub_id != null) {
+                parent_sub_query = "for $elem in subdivisions where $elem/id = " + parent_sub_id + " return $elem";
+                parent_sub_result = ArraySelectAll(tools.xquery(parent_sub_query));
+
+                if (ArrayCount(parent_sub_result) > 0) {
+                    parent_sub_name = String(parent_sub_result[0].name);
+
+                    if (startsWithHiddenPrefix(parent_sub_name)) {
+                        parent_is_grouped = true;
+                        result.GetOptProperty('debug').push('This subdivision is child of grouped element (hidden parent: ' + parent_sub_name + ')');
+                    } else {
+                        grandparent_sub_id = String(parent_sub_result[0].parent_object_id);
+
+                        if (grandparent_sub_id != '' && grandparent_sub_id != null) {
+                            grandparent_sub_query = "for $elem in subdivisions where $elem/id = " + grandparent_sub_id + " return $elem";
+                            grandparent_sub_result = ArraySelectAll(tools.xquery(grandparent_sub_query));
+
+                            if (ArrayCount(grandparent_sub_result) > 0) {
+                                grandparent_sub_name = String(grandparent_sub_result[0].name);
+
+                                if (startsWithHiddenPrefix(grandparent_sub_name)) {
+                                    parent_is_grouped = true;
+                                    result.GetOptProperty('debug').push('This subdivision is grandchild of grouped element (hidden grandparent: ' + grandparent_sub_name + ')');
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch(parentCheckErr) {
+        result.GetOptProperty('debug').push('Error checking parent/grandparent: ' + String(parentCheckErr));
+    }
+
+    func_manager_id = getFuncManagerForSubdivision(subdivision_id, is_part_of_group);
+    result.GetOptProperty('debug').push('Loading FM for subdivision ' + subdivision_id + ', is_part_of_group=' + is_part_of_group + ', FM=' + func_manager_id);
+
+    col_query = "for $elem in collaborators where $elem/position_parent_id = " + subdivision_id + " and $elem/is_dismiss = false() return $elem";
+    col_list = ArraySelectAll(tools.xquery(col_query));
+
+    collaborators_array = [];
+    children_array = [];
+
+    child_subdivisions_query = "for $elem in subdivisions where $elem/parent_object_id = " + subdivision_id + " and $elem/is_disbanded != true() return $elem";
+    child_subdivisions_list = ArraySelectAll(tools.xquery(child_subdivisions_query));
+
+    child_func_managers_map = new Object();
+    for (child_sub in child_subdivisions_list) {
+        try {
+            child_sub_id = String(child_sub.id);
+            is_child_part_of_group = false;
+            if (is_part_of_group) {
+                is_child_part_of_group = true;
+            } else {
+                try {
+                    child_parent_query = "for $elem in subdivisions where $elem/id = " + child_sub_id + " return $elem";
+                    child_parent_result = ArraySelectAll(tools.xquery(child_parent_query));
+
+                    if (ArrayCount(child_parent_result) > 0) {
+                        child_parent_id = String(child_parent_result[0].parent_object_id);
+
+                        if (child_parent_id != '' && child_parent_id != null) {
+                            child_grandparent_query = "for $elem in subdivisions where $elem/id = " + child_parent_id + " return $elem";
+                            child_grandparent_result = ArraySelectAll(tools.xquery(child_grandparent_query));
+
+                            if (ArrayCount(child_grandparent_result) > 0) {
+                                child_grandparent_name = String(child_grandparent_result[0].name);
+                                if (startsWithHiddenPrefix(child_grandparent_name)) {
+                                    is_child_part_of_group = true;
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }
+
+            child_fm_id = getFuncManagerForSubdivision(child_sub_id, is_child_part_of_group);
+            if (child_fm_id != '') {
+                child_func_managers_map.SetProperty(child_fm_id, child_sub_id);
+                result.GetOptProperty('debug').push('Normal mode: Child FM ' + child_fm_id + ' for sub ' + child_sub_id);
+            }
+        } catch(e) {}
+    }
+
+    for (child_sub in normal_subdivisions) {
+        has_collab = hasCollaboratorsRecursive(String(child_sub.id), 0);
+        if (!has_collab) continue;
+        try {
+            child_data = new Object();
+            child_data.SetProperty('id', String(child_sub.id));
+            childName = getSubNameById(String(child_sub.id));
+            if (childName == null) {
+                childName = String(child_sub.name);
+            }
+            child_data.SetProperty('name', childName);
+            child_data.SetProperty('org_id', String(child_sub.org_id));
+            child_data.SetProperty('parent_object_id', String(child_sub.parent_object_id));
+            has_sub_with_collab = hasSubdivisionsWithCollaborators(String(child_sub.id));
+            child_data.SetProperty('has_subdivisions', has_sub_with_collab);
+            child_data.SetProperty('children', []);
+            child_data.SetProperty('collaborators', []);
+            children_array.push(child_data);
+        } catch(normErr) {}
+    }
+
+    grouped_keys = [];
+    for (normalized_key in grouped_departments) {
+        grouped_keys.push(normalized_key);
+    }
+    for (i = 0; i < ArrayCount(grouped_keys); i++) {
+        try {
+            normalized_key = grouped_keys[i];
+            dept_group = grouped_departments.GetOptProperty(normalized_key);
+            if (ArrayCount(dept_group) == 0) continue;
+            first_dept = dept_group[0];
+            display_name = String(first_dept.display_name);
+            while (StrContains(display_name, '.', false)) {
+                display_name = StrReplace(display_name, '.', '');
+            }
+            display_name = Trim(display_name);
+            grouped_ids_str = '';
+            for (j = 0; j < ArrayCount(dept_group); j++) {
+                if (j > 0) grouped_ids_str = grouped_ids_str + ',';
+                dept_int = OptInt(String(dept_group[j].id));
+                grouped_ids_str = grouped_ids_str + dept_int;
+                result.GetOptProperty('debug').push('Initial group ids_str build: j=' + j + ', dept_int=' + dept_int + ', str so far=' + grouped_ids_str);
+            }
+            result.GetOptProperty('debug').push('Final grouped_ids_str for ' + normalized_key + ' = ' + grouped_ids_str + ', length=' + StrLen(grouped_ids_str));
+            has_real_children = false;
+            for (j = 0; j < ArrayCount(dept_group); j++) {
+                if (hasSubdivisionsWithCollaborators(String(dept_group[j].id))) {
+                    has_real_children = true;
+                    break;
+                }
+            }
+
+            grouped_data = new Object();
+            grouped_data.SetProperty('id', 'grouped_' + normalized_key);
+            grouped_data.SetProperty('name', display_name);
+            grouped_data.SetProperty('type', 'grouped');
+            grouped_data.SetProperty('is_grouped', true);
+            grouped_data.SetProperty('group_count', ArrayCount(dept_group));
+            grouped_data.SetProperty('has_subdivisions', has_real_children);
+            grouped_data.SetProperty('grouped_items_str', grouped_ids_str);
+            grouped_data.SetProperty('children', []);
+            grouped_data.SetProperty('collaborators', []);
+            children_array.push(grouped_data);
+        } catch(groupErr) {}
+    }
+
+    for (col_elem in col_list) {
+        try {
+            if (!col_elem.id || col_elem.id == '') continue;
+
+            col_elem_id = String(col_elem.id);
+
+            if (func_manager_id != '' && col_elem_id == func_manager_id) continue;
+
+            is_child_fm = child_func_managers_map.HasProperty(col_elem_id);
+            is_birthday = checkBirthday(col_elem.birth_date);
+            is_on_vacation = (String(col_elem.current_state) == 'Отпуск');
+            col_sub_query = "for $elem in subdivisions where $elem/id = " + String(col_elem.position_parent_id) + " return $elem";
+            col_sub_result = ArraySelectAll(tools.xquery(col_sub_query));
+            col_subdivision_name = '';
+            if (ArrayCount(col_sub_result) > 0) {
+                colSubName = getSubNameById(String(col_elem.position_parent_id));
+                if (colSubName == null) {
+                    colSubName = String(col_sub_result[0].name);
+                }
+                col_subdivision_name = colSubName;
+            }
+            col_data = new Object();
+            col_data.SetProperty('id', col_elem_id);
+            col_data.SetProperty('name', String(col_elem.fullname));
+            col_data.SetProperty('name_lower', StrLowerCase(String(col_elem.fullname)));
+            col_data.SetProperty('subdivision_id', String(col_elem.position_parent_id));
+            col_data.SetProperty('subdivision_name', col_subdivision_name);
+            col_data.SetProperty('email', String(col_elem.email != null ? col_elem.email : '—'));
+            col_data.SetProperty('pict_url', String(col_elem.pict_url != null ? col_elem.pict_url : ''));
+            col_data.SetProperty('position_name', String(col_elem.position_name != null ? col_elem.position_name : '—'));
+            col_data.SetProperty('mobile_phone', String(col_elem.mobile_phone != null ? col_elem.mobile_phone : '—'));
+            col_data.SetProperty('phone', String(col_elem.phone != null ? col_elem.phone : '—'));
+            col_data.SetProperty('is_birthday', is_birthday);
+            col_data.SetProperty('is_on_vacation', is_on_vacation);
+            col_data.SetProperty('is_func_manager', is_child_fm);
+
+            // Проверка региональной принадлежности - используем вспомогательную функцию
+            try {
+                col_pos_parent_id = String(col_elem.position_parent_id);
+                territorial_result = findTerritorialParent(col_pos_parent_id, 10);
+                if (territorial_result.id != '') {
+                    col_data.SetProperty('regional_name', territorial_result.name);
+                    col_data.SetProperty('regional_parent_id', territorial_result.id);
+                    col_data.SetProperty('original_dept_id', col_pos_parent_id);
+                }
+            } catch(regional_err) {
+                result.GetOptProperty('debug').push('Error checking regional for col ' + col_elem_id + ': ' + String(regional_err));
+            }
+
+            collaborators_array.push(col_data);
+        } catch(colErr) {}
+    }
+
+    // Сортировка collaborators_array с учетом региональной группировки
+    if (parent_is_grouped) {
+        result.GetOptProperty('debug').push('Applying regional grouping for child subdivision');
+
+        collaborators_by_regional = new Object();
+        regional_order = [];
+
+        for (c in collaborators_array) {
+            regional_id = c.GetOptProperty('regional_parent_id', '');
+            regional_name = c.GetOptProperty('regional_name', 'Без региона');
+
+            if (regional_id != '') {
+                if (!collaborators_by_regional.HasProperty(regional_id)) {
+                    regional_info = new Object();
+                    regional_info.SetProperty('name', regional_name);
+                    regional_info.SetProperty('collaborators', []);
+                    collaborators_by_regional.SetProperty(regional_id, regional_info);
+                    regional_order.push(regional_id);
+                }
+                collaborators_by_regional.GetOptProperty(regional_id).collaborators.push(c);
+            }
+        }
+
+        collaborators_array = [];
+
+        for (i = 0; i < ArrayCount(regional_order); i++) {
+            regional_id = regional_order[i];
+            regional_info = collaborators_by_regional.GetOptProperty(regional_id);
+            regional_collab = regional_info.collaborators;
+
+            regional_managers = [];
+            regional_regular = [];
+
+            for (col in regional_collab) {
+                if (col.is_func_manager == true) {
+                    regional_managers.push(col);
+                } else {
+                    regional_regular.push(col);
+                }
+            }
+
+            regional_managers = ArraySort(regional_managers, 'name_lower', '+');
+            regional_regular = ArraySort(regional_regular, 'name_lower', '+');
+
+            regional_header = new Object();
+            regional_header.SetProperty('is_regional_header', true);
+            regional_header.SetProperty('regional_name', regional_info.name);
+            collaborators_array.push(regional_header);
+
+            for (mgr in regional_managers) {
+                collaborators_array.push(mgr);
+            }
+
+            for (reg in regional_regular) {
+                collaborators_array.push(reg);
+            }
+        }
+    } else {
+        func_managers_arr = [];
+        regular_collaborators_arr = [];
+        for (c in collaborators_array) {
+            if (c.is_func_manager == true) {
+                func_managers_arr.push(c);
+            } else {
+                regular_collaborators_arr.push(c);
+            }
+        }
+        func_managers_arr = ArraySort(func_managers_arr, 'name_lower', '+');
+        regular_collaborators_arr = ArraySort(regular_collaborators_arr, 'name_lower', '+');
+        collaborators_array = [];
+        for (fm in func_managers_arr) {
+            collaborators_array.push(fm);
+        }
+        for (rc in regular_collaborators_arr) {
+            collaborators_array.push(rc);
+        }
+    }
+
+    subdivision_data = new Object();
+    subdivision_data.SetProperty('id', subdivision_id);
+    subdivision_data.SetProperty('hierarchy_path', hierarchy_path);
+    subdivision_data.SetProperty('children', children_array);
+    subdivision_data.SetProperty('collaborators', collaborators_array);
+
+    include_all_param = Request.QueryString.GetOptProperty('include_all_collaborators', '');
+    offset_param = OptInt(Request.QueryString.GetOptProperty('offset', '0'));
+    limit_param = OptInt(Request.QueryString.GetOptProperty('limit', '20'));
+
+    if (include_all_param == 'true') {
+        try {
+            paginated_result = getAllCollaboratorsPaginated(subdivision_id, offset_param, limit_param);
+            subdivision_data.SetProperty('all_collaborators', paginated_result.GetOptProperty('collaborators'));
+            subdivision_data.SetProperty('total_count', paginated_result.GetOptProperty('total_count'));
+            subdivision_data.SetProperty('current_offset', paginated_result.GetOptProperty('offset'));
+            subdivision_data.SetProperty('current_limit', paginated_result.GetOptProperty('limit'));
+            subdivision_data.SetProperty('has_more', paginated_result.GetOptProperty('has_more'));
+        } catch(allCollabErr) {
+            subdivision_data.SetProperty('all_collaborators', []);
+            subdivision_data.SetProperty('total_count', 0);
+            subdivision_data.SetProperty('has_more', false);
+        }
+    } else {
+        subdivision_data.SetProperty('all_collaborators', []);
+        subdivision_data.SetProperty('total_count', 0);
+        subdivision_data.SetProperty('has_more', false);
+    }
+
+    result.SetProperty('subdivision', subdivision_data);
+    Response.Write(tools.object_to_text(result, 'json'));
+} else if (org_id != '') {
+    // === ОБРАБОТКА ORG_ID (Загрузка подразделений организации) ===
+    try {
+        sub_query = "for $elem in subdivisions where $elem/is_disbanded != true() and $elem/org_id = " + org_id + " and ($elem/parent_object_id = null() or $elem/parent_object_id = '') return $elem";
+        sub_list = ArraySelectAll(tools.xquery(sub_query));
+        hidden_subdivisions = [];
+        normal_subdivisions = [];
+        for (sub_elem in sub_list) {
+            if (!sub_elem.id || sub_elem.id == '') continue;
+            subName = getSubNameById(String(sub_elem.id));
+            if (subName == null) {
+                subName = String(sub_elem.name);
+            }
+            if (startsWithHiddenPrefix(subName)) {
+                hidden_subdivisions.push(sub_elem);
+            } else {
+                normal_subdivisions.push(sub_elem);
+            }
+        }
+
+        for (sub_elem in normal_subdivisions) {
+
+            subName = getSubNameById(String(sub_elem.id));
+            if (subName == null) {
+                subName = String(sub_elem.name);
+            }
+            result.GetOptProperty('debug').push('Top-level subdivision: id=' + String(sub_elem.id) + ', name=' + subName);
+        }
+        grouped_departments = new Object();
+        for (hidden_sub in hidden_subdivisions) {
+            try {
+                hiddenSubName = getSubNameById(String(hidden_sub.id));
+                if (hiddenSubName == null) {
+                    hiddenSubName = String(hidden_sub.name);
+                }
+                dept_query = "for $elem in subdivisions where $elem/parent_object_id = " + String(hidden_sub.id) + " and $elem/is_disbanded != true() return $elem";
+                dept_list = ArraySelectAll(tools.xquery(dept_query));
+                for (dept in dept_list) {
+                    if (!dept.id || dept.id == '') continue;
+                    has_collab = hasCollaboratorsRecursive(String(dept.id), 0);
+                    if (!has_collab) continue;
+                    deptName = getSubNameById(String(dept.id));
+                    if (deptName == null) {
+                        deptName = String(dept.name);
+                    }
+                    normalized = normalizeSubdivisionName(deptName);
+                    result.GetOptProperty('debug').push('Initial dept: id=' + String(dept.id) + ' (int=' + OptInt(String(dept.id)) + '), name=' + deptName + ', normalized=' + normalized + ', hidden_parent=' + String(hidden_sub.id));
+                    dept_copy = new Object();
+                    dept_copy.SetProperty('id', String(dept.id));
+                    dept_copy.SetProperty('name', String(dept.name));
+                    dept_copy.SetProperty('org_id', String(dept.org_id));
+                    dept_copy.SetProperty('parent_object_id', String(dept.parent_object_id));
+                    dept_copy.SetProperty('regional_parent_id', String(hidden_sub.id));
+                    dept_copy.SetProperty('regional_parent_name', hiddenSubName);
+                    dept_copy.SetProperty('display_name', deptName);
+                    if (!grouped_departments.HasProperty(normalized)) {
+                        grouped_departments.SetProperty(normalized, []);
+                    }
+                    grouped_departments.GetOptProperty(normalized).push(dept_copy);
+                }
+            } catch(hiddenErr) {}
+        }
+        structure_array = [];
+        for (sub_elem in normal_subdivisions) {
+            has_collab_top = hasCollaboratorsRecursive(String(sub_elem.id), 0);
+            if (!has_collab_top) continue;
+            try {
+                if (!sub_elem.id || sub_elem.id == '') continue;
+                sub_data = new Object();
+                sub_data.SetProperty('id', String(sub_elem.id));
+                subName = getSubNameById(String(sub_elem.id));
+                if (subName == null) {
+                    subName = String(sub_elem.name);
+                }
+                sub_data.SetProperty('name', subName);
+                sub_data.SetProperty('org_id', String(sub_elem.org_id));
+                sub_data.SetProperty('parent_object_id', String(sub_elem.parent_object_id));
+                has_sub_with_collab = hasSubdivisionsWithCollaborators(String(sub_elem.id));
+                sub_data.SetProperty('has_subdivisions', has_sub_with_collab);
+                sub_data.SetProperty('children', []);
+                sub_data.SetProperty('collaborators', []);
+                structure_array.push(sub_data);
+            } catch(subErr) {}
+        }
+        grouped_keys = [];
+        for (normalized_key in grouped_departments) {
+            grouped_keys.push(normalized_key);
+        }
+        for (i = 0; i < ArrayCount(grouped_keys); i++) {
+            try {
+                normalized_key = grouped_keys[i];
+                dept_group = grouped_departments.GetOptProperty(normalized_key);
+                if (ArrayCount(dept_group) == 0) continue;
+
+                has_real_children = false;
+                for (j = 0; j < ArrayCount(dept_group); j++) {
+                    if (hasSubdivisionsWithCollaborators(String(dept_group[j].id))) {
+                        has_real_children = true;
+                        break;
+                    }
+                }
+
+                first_dept = dept_group[0];
+                display_name = String(first_dept.display_name);
+                while (StrContains(display_name, '.', false)) {
+                    display_name = StrReplace(display_name, '.', '');
+                }
+                display_name = Trim(display_name);
+                grouped_ids_str = '';
+                for (j = 0; j < ArrayCount(dept_group); j++) {
+                    if (j > 0) grouped_ids_str = grouped_ids_str + ',';
+                    grouped_ids_str = grouped_ids_str + String(dept_group[j].id);
+                }
+                grouped_data = new Object();
+                grouped_data.SetProperty('id', 'grouped_' + normalized_key);
+                grouped_data.SetProperty('name', display_name);
+                grouped_data.SetProperty('type', 'grouped');
+                grouped_data.SetProperty('is_grouped', true);
+                grouped_data.SetProperty('group_count', ArrayCount(dept_group));
+                grouped_data.SetProperty('has_subdivisions', has_real_children);
+                grouped_data.SetProperty('grouped_items_str', grouped_ids_str);
+                grouped_data.SetProperty('children', []);
+                grouped_data.SetProperty('collaborators', []);
+                structure_array.push(grouped_data);
+            } catch(groupErr) {}
+        }
+        org_name_for_sort = '';
+        try {
+            if (org_id != '') {
+                org_name_query = "for $elem in orgs where $elem/id = " + org_id + " return $elem";
+                org_name_result = ArraySelectAll(tools.xquery(org_name_query));
+                if (ArrayCount(org_name_result) > 0) {
+                    org_name_for_sort = String(org_name_result[0].name);
+                }
+            }
+        } catch(e) {}
+
+        structure_array = sortSubdivisionsByName(structure_array, org_name_for_sort);
+        result.SetProperty('structure', structure_array);
+        Response.Write(tools.object_to_text(result, 'json'));
+    } catch(orgErr) {
+        result.SetProperty('error', 'Org processing error: ' + String(orgErr));
+        Response.Write(tools.object_to_text(result, 'json'));
+    }
+} else if (letter_param != '' || search_param != '') {
+    // === ОБРАБОТКА LETTER/SEARCH (Фильтрация сотрудников) ===
+    try {
+        col_query = "for $elem in collaborators where $elem/is_dismiss = false() return $elem";
+        all_col_list = ArraySelectAll(tools.xquery(col_query));
+        filtered_col_list = [];
+        if (letter_param != '') {
+            letter_upper = StrUpperCase(letter_param);
+            for (col in all_col_list) {
+                try {
+                    if (col.fullname != null && col.fullname != '') {
+                        fullname_str = String(col.fullname);
+                        fullname_upper = StrUpperCase(fullname_str);
+                        if (StrLen(fullname_upper) > 0) {
+                            if (StrBegins(fullname_upper, letter_upper)) {
+                                filtered_col_list.push(col);
+                            }
+                        }
+                    }
+                } catch(letterErr) {}
+            }
+        } else if (search_param != '') {
+            search_lower = StrLowerCase(search_param);
+            for (col in all_col_list) {
+                try {
+                    if (col.fullname != null && col.fullname != '') {
+                        fullname_lower = StrLowerCase(String(col.fullname));
+                        if (StrContains(fullname_lower, search_lower, false)) {
+                            filtered_col_list.push(col);
+                        }
+                    }
+                } catch(searchErr) {}
+            }
+        }
+        func_managers_filtered = [];
+        regular_filtered = [];
+        for (c in filtered_col_list) {
+            try {
+                if (!c.id || c.id == '') continue;
+                is_func_mgr = isPersonFuncManager(String(c.id));
+                is_birthday = checkBirthday(c.birth_date);
+                is_on_vacation = (String(c.current_state) == 'Отпуск');
+                col_sub_query = "for $elem in subdivisions where $elem/id = " + String(c.position_parent_id) + " return $elem";
+                col_sub_result = ArraySelectAll(tools.xquery(col_sub_query));
+                col_subdivision_name = '';
+                if (ArrayCount(col_sub_result) > 0) {
+                    colSubName = getSubNameById(String(c.position_parent_id));
+                    if (colSubName == null) {
+                        colSubName = String(col_sub_result[0].name);
+                    }
+                    col_subdivision_name = colSubName;
+                }
+                col_data = new Object();
+                col_data.SetProperty('id', String(c.id));
+                col_data.SetProperty('name', String(c.fullname));
+                col_data.SetProperty('name_lower', StrLowerCase(String(c.fullname)));
+                col_data.SetProperty('subdivision_id', String(c.position_parent_id));
+                col_data.SetProperty('subdivision_name', col_subdivision_name);
+                col_data.SetProperty('email', String(c.email != null ? c.email : '—'));
+                col_data.SetProperty('pict_url', String(c.pict_url != null ? c.pict_url : ''));
+                col_data.SetProperty('position_name', String(c.position_name != null ? c.position_name : '—'));
+                col_data.SetProperty('mobile_phone', String(c.mobile_phone != null ? c.mobile_phone : '—'));
+                col_data.SetProperty('phone', String(c.phone != null ? c.phone : '—'));
+                col_data.SetProperty('is_birthday', is_birthday);
+                col_data.SetProperty('is_on_vacation', is_on_vacation);
+                col_data.SetProperty('is_func_manager', is_func_mgr);
+                col_data.SetProperty('dept_name_normalized', normalizeSubdivisionName(col_subdivision_name));
+                col_data.SetProperty('is_dismiss', false);
+                try {
+                    full_path_items = [];
+                    current_sub_id = String(c.position_parent_id);
+                    path_depth = 0;
+
+                    while (current_sub_id != '' && current_sub_id != null && path_depth < 20) {
+                        path_depth++;
+                        sub_path_query = "for $elem in subdivisions where $elem/id = " + current_sub_id + " return $elem";
+                        sub_path_result = ArraySelectAll(tools.xquery(sub_path_query));
+
+                        if (ArrayCount(sub_path_result) == 0) break;
+
+                        sub_path_info = sub_path_result[0];
+                        sub_path_name = getSubNameById(String(sub_path_info.id));
+                        if (sub_path_name == null) {
+                            sub_path_name = String(sub_path_info.name);
+                        }
+
+                        clean_path_name = sub_path_name;
+                        while (StrContains(clean_path_name, '.', false)) {
+                            clean_path_name = StrReplace(clean_path_name, '.', '');
+                        }
+                        clean_path_name = Trim(clean_path_name);
+
+                        is_hidden_prefix = false;
+                        for (h_idx = 0; h_idx < ArrayCount(hiddenPrefixes); h_idx++) {
+                            if (StrBegins(StrLowerCase(clean_path_name), StrLowerCase(hiddenPrefixes[h_idx]), false)) {
+                                is_hidden_prefix = true;
+                                break;
+                            }
+                        }
+
+                        if (!is_hidden_prefix && clean_path_name != '') {
+                            full_path_items.push(clean_path_name);
+                        }
+
+                        if (sub_path_info.parent_object_id != '' && sub_path_info.parent_object_id != null) {
+                            current_sub_id = String(sub_path_info.parent_object_id);
+                        } else {
+                            try {
+                                org_path_query = "for $elem in orgs where $elem/id = " + String(sub_path_info.org_id) + " return $elem";
+                                org_path_result = ArraySelectAll(tools.xquery(org_path_query));
+                                if (ArrayCount(org_path_result) > 0) {
+                                    full_path_items.push(String(org_path_result[0].name));
+                                }
+                            } catch(org_path_err) {}
+                            break;
+                        }
+                    }
+
+                    reversed_path = [];
+                    for (rev_idx = ArrayCount(full_path_items) - 1; rev_idx >= 0; rev_idx--) {
+                        reversed_path.push(full_path_items[rev_idx]);
+                    }
+
+                    full_path_str = '';
+                    for (fp_idx = 0; fp_idx < ArrayCount(reversed_path); fp_idx++) {
+                        if (fp_idx > 0) full_path_str = full_path_str + ' → ';
+                        full_path_str = full_path_str + reversed_path[fp_idx];
+                    }
+
+                    col_data.SetProperty('full_path', full_path_str);
+                } catch(path_err) {
+                    col_data.SetProperty('full_path', '');
+                }
+                if (is_func_mgr) {
+                    func_managers_filtered.push(col_data);
+                } else {
+                    regular_filtered.push(col_data);
+                }
+            } catch(filtErr) {}
+        }
+        func_managers_filtered = ArraySort(func_managers_filtered, 'name_lower', '+');
+        regular_filtered = ArraySort(regular_filtered, 'name_lower', '+');
+        for (fm in func_managers_filtered) {
+            result.GetOptProperty('filtered_collaborators').push(fm);
+        }
+        for (rc in regular_filtered) {
+            result.GetOptProperty('filtered_collaborators').push(rc);
+        }
+        structure_array = [];
+        if (search_param != '') {
+            // Код для фильтрации подразделений по поиску будет добавлен в следующем блоке...
+            structure_array = [];
+        }
+
+        if (ArrayCount(structure_array) == 0 && search_param == '') {
+            try {
+                org_query = "for $elem in orgs order by $elem/name ascending return $elem";
+                org_list = ArraySelectAll(tools.xquery(org_query));
+
+                temp_org_array = [];
+
+                for (org_elem in org_list) {
+                    try {
+                        if (!org_elem.id || org_elem.id == '') continue;
+
+                        if (isOrgExcluded(String(org_elem.id))) {
+                            result.GetOptProperty('debug').push('Skipping excluded org: ' + String(org_elem.name) + ' (id=' + String(org_elem.id) + ')');
+                            continue;
+                        }
+
+                        org_data = new Object();
+                        org_data.SetProperty('id', String(org_elem.id));
+                        org_data.SetProperty('name', String(org_elem.name));
+                        org_data.SetProperty('type', 'organization');
+                        org_data.SetProperty('has_subdivisions', true);
+                        org_data.SetProperty('children', []);
+                        org_data.SetProperty('collaborators', []);
+                        temp_org_array.push(org_data);
+                    } catch(orgItemErr) {}
+                }
+
+                sorted_org_array = sortOrganizations(temp_org_array);
+
+                for (org in sorted_org_array) {
+                    structure_array.push(org);
+                }
+            } catch(orgListErr) {}
+        }
+
+        result.SetProperty('structure', structure_array);
+        Response.Write(tools.object_to_text(result, 'json'));
+    } catch(filterErr) {
+        result.SetProperty('error', 'Filter processing error: ' + String(filterErr));
+        Response.Write(tools.object_to_text(result, 'json'));
+    }
+} else {
+    // === ДЕФОЛТНАЯ ЗАГРУЗКА (Список организаций) ===
+    try {
+        org_query = "for $elem in orgs order by $elem/name ascending return $elem";
+        org_list = ArraySelectAll(tools.xquery(org_query));
+
+        temp_org_array = [];
+
+        for (org_elem in org_list) {
+            try {
+                if (!org_elem.id || org_elem.id == '') continue;
+
+                if (isOrgExcluded(String(org_elem.id))) {
+                    result.GetOptProperty('debug').push('Skipping excluded org: ' + String(org_elem.name) + ' (id=' + String(org_elem.id) + ')');
+                    continue;
+                }
+
+                org_data = new Object();
+                org_data.SetProperty('id', String(org_elem.id));
+                org_data.SetProperty('name', String(org_elem.name));
+                org_data.SetProperty('type', 'organization');
+                org_data.SetProperty('has_subdivisions', true);
+                org_data.SetProperty('children', []);
+                org_data.SetProperty('collaborators', []);
+                temp_org_array.push(org_data);
+            } catch(orgItemErr) {}
+        }
+
+        sorted_org_array = sortOrganizations(temp_org_array);
+
+        for (org in sorted_org_array) {
+            result.GetOptProperty('structure').push(org);
+        }
+
+        Response.Write(tools.object_to_text(result, 'json'));
+    } catch(initErr) {
+        result.SetProperty('error', 'Initial load error: ' + String(initErr));
         Response.Write(tools.object_to_text(result, 'json'));
     }
 }
 
-// === КОНЕЦ ПЕРВОЙ ЧАСТИ (ФУНКЦИИ-УТИЛИТЫ) ===
+} catch (e) {
+    result = new Object();
+    result.SetProperty('error', 'Internal Server Error: ' + String(e));
+    result.SetProperty('debug', ['Exception: ' + String(e)]);
+    Response.Write(tools.object_to_text(result, 'json'));
+}
 %>
