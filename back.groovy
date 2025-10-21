@@ -1292,17 +1292,151 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
 
                         result.GetOptProperty('debug').push('Parent dept ' + dept_id + ' has ' + ArrayCount(dept_grandchildren) + ' grandchildren (level 2)');
 
-                        // Обработка руководителей и сотрудников - продолжение следует из-за размера...
-                        // (код будет добавлен в следующем блоке)
+                        // ===== Загружаем сотрудников со ВСЕХ УРОВНЕЙ =====
+
+                        // Уровень 0: Прямые сотрудники родителя
+                        parent_col_query = "for $elem in collaborators where $elem/position_parent_id = " + dept_id + " and $elem/is_dismiss = false() return $elem";
+                        parent_cols = ArraySelectAll(tools.xquery(parent_col_query));
+
+                        // Уровень 1: Сотрудники дочерних подразделений
+                        children_cols = [];
+                        for (dept_child in dept_children) {
+                            try {
+                                child_col_query = "for $elem in collaborators where $elem/position_parent_id = " + String(dept_child.id) + " and $elem/is_dismiss = false() return $elem";
+                                child_cols = ArraySelectAll(tools.xquery(child_col_query));
+                                for (cc in child_cols) {
+                                    children_cols.push(cc);
+                                }
+                            } catch(childColErr) {}
+                        }
+
+                        // Уровень 2: Сотрудники внуков
+                        grandchildren_cols = [];
+                        for (dept_gc in dept_grandchildren) {
+                            try {
+                                gc_col_query = "for $elem in collaborators where $elem/position_parent_id = " + String(dept_gc.id) + " and $elem/is_dismiss = false() return $elem";
+                                gc_cols = ArraySelectAll(tools.xquery(gc_col_query));
+                                for (gcc in gc_cols) {
+                                    grandchildren_cols.push(gcc);
+                                }
+                            } catch(gcColErr) {}
+                        }
+
+                        result.GetOptProperty('debug').push('Dept ' + dept_id + ' collaborators: parent=' + ArrayCount(parent_cols) + ', children=' + ArrayCount(children_cols) + ', grandchildren=' + ArrayCount(grandchildren_cols));
+
+                        // Объединяем всех сотрудников
+                        all_dept_cols = [];
+                        for (pc in parent_cols) {
+                            all_dept_cols.push(pc);
+                        }
+                        for (cc in children_cols) {
+                            all_dept_cols.push(cc);
+                        }
+                        for (gcc in grandchildren_cols) {
+                            all_dept_cols.push(gcc);
+                        }
+
+                        // Загружаем функционального руководителя родителя
+                        func_manager_id = '';
+                        try {
+                            func_manager_id = getFuncManagerForSubdivision(dept_id);
+                        } catch(fmErr) {}
+
+                        // Обрабатываем каждого сотрудника
+                        for (col_elem in all_dept_cols) {
+                            try {
+                                if (!col_elem.id || col_elem.id == '') continue;
+
+                                person_id = String(col_elem.id);
+
+                                // Пропускаем дубликаты
+                                if (added_person_ids.HasProperty(person_id)) continue;
+
+                                is_func_mgr = (person_id == func_manager_id);
+                                is_birthday = checkBirthday(col_elem.birth_date);
+                                is_on_vacation = (String(col_elem.current_state) == 'Отпуск');
+
+                                // Получаем имя подразделения сотрудника
+                                col_sub_id = String(col_elem.position_parent_id);
+                                col_sub_name = getSubNameById(col_sub_id);
+                                if (col_sub_name == null) {
+                                    col_sub_query = "for $elem in subdivisions where $elem/id = " + col_sub_id + " return $elem";
+                                    col_sub_result = ArraySelectAll(tools.xquery(col_sub_query));
+                                    if (ArrayCount(col_sub_result) > 0) {
+                                        col_sub_name = String(col_sub_result[0].name);
+                                    } else {
+                                        col_sub_name = '';
+                                    }
+                                }
+
+                                // Очищаем от точек
+                                clean_col_sub_name = col_sub_name;
+                                while (StrContains(clean_col_sub_name, '.', false)) {
+                                    clean_col_sub_name = StrReplace(clean_col_sub_name, '.', '');
+                                }
+                                clean_col_sub_name = Trim(clean_col_sub_name);
+
+                                col_data = new Object();
+                                col_data.SetProperty('id', person_id);
+                                col_data.SetProperty('name', String(col_elem.fullname));
+                                col_data.SetProperty('name_lower', StrLowerCase(String(col_elem.fullname)));
+                                col_data.SetProperty('subdivision_id', col_sub_id);
+                                col_data.SetProperty('subdivision_name', clean_col_sub_name);
+                                col_data.SetProperty('dept_name_normalized', dept_name_normalized);
+                                col_data.SetProperty('regional_parent_id', regional_parent_id_str);
+                                col_data.SetProperty('regional_name', regional_name);
+                                col_data.SetProperty('email', String(col_elem.email != null ? col_elem.email : '—'));
+                                col_data.SetProperty('pict_url', String(col_elem.pict_url != null ? col_elem.pict_url : ''));
+                                col_data.SetProperty('position_name', String(col_elem.position_name != null ? col_elem.position_name : '—'));
+                                col_data.SetProperty('mobile_phone', String(col_elem.mobile_phone != null ? col_elem.mobile_phone : '—'));
+                                col_data.SetProperty('phone', String(col_elem.phone != null ? col_elem.phone : '—'));
+                                col_data.SetProperty('is_birthday', is_birthday);
+                                col_data.SetProperty('is_on_vacation', is_on_vacation);
+                                col_data.SetProperty('is_func_manager', is_func_mgr);
+
+                                collaborators_by_normalized_name.GetOptProperty(dept_name_normalized).push(col_data);
+                                added_person_ids.SetProperty(person_id, true);
+
+                            } catch(colErr) {
+                                result.GetOptProperty('debug').push('Error processing collaborator: ' + String(colErr));
+                            }
+                        }
 
                     } catch(deptErr) {
                         result.GetOptProperty('debug').push('Error loading parent dept: ' + String(deptErr));
                     }
                 }
 
-                subdivision_data.SetProperty('all_collaborators', []);
-                subdivision_data.SetProperty('total_count', 0);
-                subdivision_data.SetProperty('has_more', false);
+                // Собираем всех сотрудников из collaborators_by_normalized_name
+                all_collaborators_grouped = [];
+                for (norm_name in collaborators_by_normalized_name) {
+                    dept_collaborators = collaborators_by_normalized_name.GetOptProperty(norm_name);
+                    for (dc in dept_collaborators) {
+                        all_collaborators_grouped.push(dc);
+                    }
+                }
+
+                // Применяем пагинацию
+                total_count_grouped = ArrayCount(all_collaborators_grouped);
+                paginated_collaborators = [];
+
+                start_index = offset_param;
+                end_index = offset_param + limit_param;
+                if (end_index > total_count_grouped) {
+                    end_index = total_count_grouped;
+                }
+
+                for (idx = start_index; idx < end_index; idx++) {
+                    paginated_collaborators.push(all_collaborators_grouped[idx]);
+                }
+
+                has_more_grouped = (offset_param + limit_param) < total_count_grouped;
+
+                result.GetOptProperty('debug').push('Returning ' + ArrayCount(paginated_collaborators) + ' collaborators (total=' + total_count_grouped + ', has_more=' + has_more_grouped + ')');
+
+                subdivision_data.SetProperty('all_collaborators', paginated_collaborators);
+                subdivision_data.SetProperty('total_count', total_count_grouped);
+                subdivision_data.SetProperty('has_more', has_more_grouped);
             } catch(allCollabErr) {
                 result.GetOptProperty('debug').push('ERROR loading grouped paginated: ' + String(allCollabErr));
                 subdivision_data.SetProperty('all_collaborators', []);
