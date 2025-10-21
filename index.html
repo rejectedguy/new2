@@ -1,0 +1,989 @@
+<script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+.tree-node.level-0 .tree-node-header { padding-left: 30px; border-bottom: 1px solid #fff; }
+.tree-node.level-1 .tree-node-header { padding-left: 40px; }
+.tree-node.level-2 .tree-node-header { padding-left: 50px; }
+.tree-node.level-3 .tree-node-header { padding-left: 60px; }
+.tree-node.level-4 .tree-node-header { padding-left: 70px; }
+		.tree-node.level-0 .tree-node-header .toggle-btn { left: 5px; }
+.tree-node.level-1 .tree-node-header .toggle-btn { left: 15px; }
+.tree-node.level-2 .tree-node-header .toggle-btn { left: 25px; }
+.tree-node.level-3 .tree-node-header .toggle-btn { left: 35px; }
+.tree-node.level-4 .tree-node-header .toggle-btn { left: 45px; }
+		.tree-node-header.organization + .tree-node-content > .tree-node > .tree-node-header {font-weight: 700;}
+		.tree-node-header.has-subdivisions {font-weight: 700;}
+		.tree-node-content {padding-left: 0;}
+        .container { display: flex; flex-direction: column; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0px; }
+        .search-wrapper { display: flex; align-items: center; gap: 10px; }
+        .search { width: 300px; padding: 8px; border: 1px solid #ccc; border-radius: 0; font-size: 14px; }
+        .letters { display: flex; gap: 1px; flex-wrap: wrap; margin-left: 10px; }
+        .letter-btn { padding: 3px 8px; background: #e0e0e0; color: black; border: 1px solid #d0d0d0; font-size: 14px; font-weight: bold; cursor: pointer; text-transform: uppercase; }
+        input[type=text] { padding: calc(3px + 2px); font-size: 15px; width: 277px;}
+        .letter-btn:hover { background: #d0d0d0; }
+        .letter-btn.active { background: #c0c0c0; }
+        .reset-btn { padding: 6px 10px; background: #6c757d; color: white; border: none; font-size: 12px; cursor: pointer; margin-left: 0px; }
+        .reset-btn:hover { background: #5a6268; }
+        .content { display: flex; gap: 20px; }
+        .tree { width: 24%; background: white; border: 1px solid #ccc; border-radius: 0; padding: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow-y: auto; max-height: 80vh; }
+        .collaborators { width: 76%; background: white; border: 1px solid #ccc; border-radius: 0; padding: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow-y: auto; max-height: 80vh; position: relative; }
+        .hierarchy-path { position: sticky; top: -10px; font-weight: 700; background: #d9d9d9; z-index: 10; padding: 10px; border: 2px solid #eee; font-size: 14px; color: #000; margin: -10px -10px 15px -10px; font-weight: 700;}
+        .tree-node-header.search-match { background: #e6f0ff; font-weight: bold; }
+        .tree-node { margin-left: 0; margin-bottom: 0; position: relative; }
+        .tree-node-header { cursor: pointer; font-size: 14px; padding: 5px 5px 5px 25px; display: flex; align-items: center; position: relative; color: black; background: #f5f5f5; }
+        .tree-node-header:hover { background: #e5e5e5; }
+        .tree-node-header.selected { color: #005bff; font-weight: 700; }
+        /*.tree-node-header.grouped {  font-weight: 600; }*/
+        .tree-node-header.organization { background: #f0f0f0; color: black; }
+        .tree-node-header.open { background: #d9d9d9; }
+        .organization { font-weight: bold; color: #0056b3; }
+        .toggle-btn {
+    position: absolute;
+    left: 5px;
+    font-size: 12px;
+    width: 15px;
+    display: inline-block;
+    text-align: center;
+    z-index: 2;
+    top: 5px; /* Добавь эту строку */
+}
+
+        .tree-node-content { display: none; position: relative; }
+        .tree-node-content.open { display: block; }
+        .tree-node-content::before { content: ''; position: absolute; left: 12px; top: 0; bottom: 0; width: 1px; background: #ccc; }
+        .tree-node-content > .tree-node::before { content: ''; position: absolute; left: 0; top: 18px; width: 12px; height: 1px; background: #ccc; }
+        .tree-node-content > .tree-node:last-child::after { content: ''; position: absolute; left: 0; top: 18px; bottom: 0; width: 1px; background: white; }
+        .tree-node-content > .tree-node .tree-node-header { background: #fafafa; border-bottom: 1px solid #ddd; }
+        .loading { color: #999; font-style: italic; }
+        .loader { border: 2px solid #f3f3f3; border-top: 2px solid #007bff; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; margin-right: 10px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        ul { list-style: none; padding-left: 0; }    
+        li { margin: 10px 0; display: flex; align-items: flex-start; padding: 10px; border-bottom: 1px solid #eee; justify-content: center; }
+        li.func-manager-item { background: #f8f9fa; /*border-left: 4px solid #e10e36;*/ margin-bottom: 15px; }
+		li.regional-header { background: #d9d9d9; font-weight: bold; font-size: 16px; padding: 15px; margin-top: 10px; display: block; }
+        li.regional-header:first-child { margin-top: -10px; }
+        li.regional-subheader { background: #e8e8e8; font-weight: 600; font-size: 14px; padding: 10px 20px 10px 20px; margin-top: 8px; display: block;  }
+        .subdivision-name { font-style: italic; color: #555; font-size: 12px; }
+        .avatar-wrapper { position: relative; width: 103px; height: 115px; margin-right: 15px; flex-shrink: 0; }
+        .avatar { width: 103px; height: 115px; border-radius: 0; object-fit: cover;}
+        .func-manager-badge { display:none!important; position: absolute; top: 15px; left: 72rem; background: linear-gradient(135deg, #e10e36 0%, #e10e36 100%); color: white; font-size: 10px; padding: 3px 8px; font-weight: bold; white-space: nowrap; z-index: 2; box-shadow: 0 2px 4px rgba(111, 66, 193, 0.3); border: 2px solid white; border-radius: 0; }
+        .status-badge { position: absolute; bottom: 105px; right: -5px; color: white; font-size: 14px; padding: 2px 5px; font-weight: bold; white-space: nowrap; z-index: 1; border-radius: 0; }
+        .status-badge.birthday { background: #ffa500; }
+        .status-badge.vacation { background: #cccccc; color: black; }
+        .status-badge.both { background: linear-gradient(135deg, #ff6b6b 50%, #ffa500 50%); }
+        .employee-info { display: flex; flex-direction: column; flex: 1; }
+        .employee-field { margin: 2px 0; color: #333; font-size: 12px; }
+        .employee-name { font-size: 22px; font-weight: bold; margin-bottom: 5px; }
+        .employee-position { margin-bottom: 10px; }
+        .employee-phones { display: flex; gap: 5px; flex-direction:column;}
+        .employee-email { position: absolute; right: 10px; bottom: 0px;}
+        #selectedSubdivision { display:none; margin-bottom: 15px; }
+        .group-badge { background: #28a745; color: white; padding: 2px 6px; font-size: 10px; margin-left: 5px; border-radius: 0; display:none!important}
+        .toggle-btn:empty { display: none; }
+        #mymy {position: relative; display: flex; flex-direction: column; bottom: 22px;}
+        .stats-info { color: #666; font-size: 13px; margin-bottom: 10px; padding: 8px; background: #f8f9fa; border-left: 3px solid #007bff; display:none!important }
+        .load-more-btn { width: 100%;  padding: 12px; background: #007bff; color: white; border: none; font-size: 14px; cursor: pointer; margin-top: 20px; border-radius: 4px;font-weight: 600;}
+        .load-more-btn:hover { background: #0056b3; }
+        .load-more-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .pagination-info {text-align: center;color: #666;font-size: 13px;margin-top: 10px;padding: 10px;background: #f8f9fa;}
+		.employee-position::first-letter {text-transform: uppercase;}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="search-wrapper">
+                <div id="mymy">
+                    <button class="reset-btn" onclick="resetFilters()">Сбросить</button>
+                    <input type="text" id="searchInput" placeholder="Поиск" class="search">
+                </div>
+                <div class="letters" id="letterFilter">
+                    <script>
+                        'АБВГДЕЁЖЗИКЛМНОПРСТУФХЦЧШЩЭЮЯ'.split('').forEach(function(letter) {
+                            document.write('<button class="letter-btn" data-letter="' + letter + '" onclick="filterByLetter(\'' + letter + '\')">' + letter + '</button>');
+                        });
+                    </script>
+                </div>
+            </div>
+        </div>
+        <div class="content">
+            <div class="tree">
+                <div id="tree"></div>
+            </div>
+            <div class="collaborators">
+                <div class="hierarchy-path" id="hierarchyPath"></div>
+                <h2 id="selectedSubdivision" style="display: none;"></h2>
+                <div class="stats-info" id="statsInfo" style="display: none;"></div>
+                <ul id="collaboratorList"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    var currentLetter = '';
+    var currentSearch = '';
+    var debounceTimeout = null;
+    var loadingIds = {};
+    var nodesData = {};
+    var viewingStructure = true;
+    var currentSubdivisionId = '';
+    var currentGroupedItems = '';
+    var currentOffset = 0;
+    var currentLimit = 20;
+    var totalCollaborators = 0;
+    var isLoadingMore = false;
+    var allLoadedCollaborators = [];
+    
+    function GetOptProperty(obj, prop, defaultValue) {
+        if (!obj || typeof obj !== 'object') return defaultValue;
+        return obj.hasOwnProperty(prop) && obj[prop] !== '' ? obj[prop] : defaultValue;
+    }
+    
+function generateAvatar(name) {
+    if (!name || name === '-') return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    var canvas = document.createElement('canvas');
+    canvas.width = 103; // Устанавливаем ширину канваса равной CSS
+    canvas.height = 115; // Устанавливаем высоту канваса равной CSS
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#007bff';
+    ctx.fillRect(0, 0, 103, 115);
+    ctx.fillStyle = 'white';
+    ctx.font = '48px Arial'; // Увеличиваем размер шрифта пропорционально
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name.charAt(0).toUpperCase(), 103 / 2, 115 / 2); // Центрируем текст
+    return canvas.toDataURL();
+}
+    
+function createCollaboratorElement(col) {
+    if (!col || GetOptProperty(col, 'is_dismiss', false)) {
+        return null;
+    }
+
+    var li = document.createElement('li');
+    var subName = GetOptProperty(col, 'subdivision_name', '-');
+    var avatarSrc = GetOptProperty(col, 'pict_url', '-') !== '-' ? col.pict_url : generateAvatar(GetOptProperty(col, 'name', '-'));
+    var isBirthday = GetOptProperty(col, 'is_birthday', false);
+    var isOnVacation = GetOptProperty(col, 'is_on_vacation', false);
+    var isFuncManager = GetOptProperty(col, 'is_func_manager', false);
+
+    var funcManagerBadge = '';
+    var liClass = 'collaborator-item';
+    if (isFuncManager && viewingStructure) {
+        liClass = 'func-manager-item';
+        funcManagerBadge = '<div class="func-manager-badge">Руководитель</div>';
+    }
+
+    var statusBadge = '';
+    if (isBirthday && isOnVacation) {
+        statusBadge = '<div class="status-badge both">ДР+Отпуск</div>';
+    } else if (isBirthday) {
+        statusBadge = '<div class="status-badge birthday">Д.Р.</div>';
+    } else if (isOnVacation) {
+        statusBadge = '<div class="status-badge vacation">Отпуск</div>';
+    }
+
+    var name = GetOptProperty(col, 'name', '-');
+    var position = GetOptProperty(col, 'position_name', '-');
+    var email = GetOptProperty(col, 'email', '-');
+    var mobilePhone = GetOptProperty(col, 'mobile_phone', '-');
+    var phone = GetOptProperty(col, 'phone', '-');
+
+    var subdivisionPath = '';
+    if (!viewingStructure) {
+        var fullPath = GetOptProperty(col, 'full_path', '');
+        if (fullPath === '') {
+            subdivisionPath = '<span class="subdivision-name">' + subName + '</span>';
+        } else {
+            subdivisionPath = '<span class="subdivision-name">' + fullPath + '</span>';
+        }
+    }
+
+    li.className = liClass;
+    li.innerHTML =
+        '<div class="avatar-wrapper" style="position: relative;">' +
+        funcManagerBadge +
+        '<img src="' + avatarSrc + '" class="avatar">' +
+        statusBadge +
+        '</div>' +
+        '<div class="employee-info" style="position: relative;">' +
+        subdivisionPath +
+        '<div class="employee-name">' + name + '</div>' +
+        '<div class="employee-position">' + position + '</div>' +
+'<div class="employee-phones">' +
+'<div>Телефон: <span style="font-weight: bold;">' + mobilePhone + '</span></div>' +
+'<div>Телефон внутренний: <span style="color: #0066cc;">' + phone + '</span></div>' +
+'</div>' +
+'<div class="employee-email"><span>Почта:</span> <span style="color: #0066cc;">' + email + '</span></div>' +
+        '</div>';
+
+    return li;
+}
+    
+    function loadOrganizationChildren(orgId, contentElement, toggleBtn) {
+        if (loadingIds[orgId]) return;
+        loadingIds[orgId] = true;
+        contentElement.innerHTML = '<div class="loading"><span class="loader"></span>Загрузка...</div>';
+        contentElement.classList.add('open');
+        toggleBtn.textContent = '▼';
+        
+        var url = '/custom_web_template.html?object_id=7560343309670892669&org_id=' + orgId;
+        axios.get(url)
+            .then(function(response) {
+                var data = response.data;
+               
+                if (data.error) {
+                    contentElement.innerHTML = '<div style="color: red;">Ошибка: ' + data.error + '</div>';
+                    delete loadingIds[orgId];
+                    return;
+                }
+                if (!data.structure || !Array.isArray(data.structure)) {
+                    contentElement.innerHTML = '<div style="color: red;">Нет данных структуры</div>';
+                    delete loadingIds[orgId];
+                    return;
+                }
+                contentElement.innerHTML = '';
+                renderTree(data.structure, contentElement, currentSearch);
+                delete loadingIds[orgId];
+            })
+            .catch(function(error) {
+                console.error('Error loading organization:', error);
+                contentElement.innerHTML = '<div style="color: red;">Ошибка загрузки: ' + error.message + '</div>';
+                delete loadingIds[orgId];
+            });
+    }
+    
+
+
+function renderTree(items, parentElement, searchTerm) {
+    if (!items || !Array.isArray(items) || items.length === 0) {
+        return;
+    }
+    console.log('=== RENDER TREE ===');
+    console.log('Items:', JSON.stringify(items, null, 2));
+    // Собираем ID всех элементов, у которых parent_object_id совпадает с ID других элементов в этом массиве
+    var parentIds = {};
+    var childIds = {};
+    
+    for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (!item || !GetOptProperty(item, 'id', '')) continue;
+        parentIds[item.id] = true;
+    }
+    
+    for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (!item || !GetOptProperty(item, 'id', '')) continue;
+        var parentObjId = GetOptProperty(item, 'parent_object_id', '');
+        
+        // Если parent_object_id этого элемента есть среди ID в текущем массиве - это дочерний элемент
+        if (parentObjId && parentIds[parentObjId]) {
+            childIds[item.id] = true;
+        }
+    }
+
+    var uniqueItems = [];
+    if (searchTerm) {
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            if (!item || !GetOptProperty(item, 'id', '')) continue;
+            uniqueItems.push({ item: item, normalized: '' });
+        }
+    } else {
+        var seenNormalized = {};
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            if (!item || !GetOptProperty(item, 'id', '')) continue;
+
+            // Пропускаем элементы, которые являются дочерними для других элементов в этом массиве
+            if (childIds[item.id]) {
+                continue;
+            }
+
+            var itemName = GetOptProperty(item, 'name', '');
+            var normalized = itemName.toLowerCase().replace(/\./g, '').replace(/\s+/g, ' ').trim();
+            var isGrouped = GetOptProperty(item, 'is_grouped', false);
+
+            if (isGrouped) {
+                if (seenNormalized[normalized] && !seenNormalized[normalized].isGrouped) {
+                    for (var u = 0; u < uniqueItems.length; u++) {
+                        if (uniqueItems[u].normalized === normalized) {
+                            uniqueItems.splice(u, 1);
+                            break;
+                        }
+                    }
+                }
+                seenNormalized[normalized] = { isGrouped: true, item: item };
+                uniqueItems.push({ item: item, normalized: normalized });
+            } else {
+                if (!seenNormalized[normalized]) {
+                    seenNormalized[normalized] = { isGrouped: false, item: item };
+                    uniqueItems.push({ item: item, normalized: normalized });
+                }
+            }
+        }
+    }
+
+for (var i = 0; i < uniqueItems.length; i++) {
+        var item = uniqueItems[i].item;
+        nodesData[item.id] = item;
+
+        var node = document.createElement('div');
+        node.className = 'tree-node';
+
+        // Добавляем класс для отслеживания уровня
+        var level = 0;
+        var parent = parentElement;
+        while (parent && parent.classList.contains('tree-node-content')) {
+            level++;
+            parent = parent.parentElement.parentElement;
+        }
+        node.classList.add('level-' + level);
+
+        var header = document.createElement('div');
+        header.className = 'tree-node-header';
+
+        var isOrganization = GetOptProperty(item, 'type', '') === 'organization';
+        var isGrouped = GetOptProperty(item, 'is_grouped', false);
+        var hasChildren = GetOptProperty(item, 'has_subdivisions', false);
+        var children = GetOptProperty(item, 'children', []); // Гарантируем, что children всегда массив
+
+        // Добавляем класс has-subdivisions, если есть дочерние подразделения
+        if (hasChildren) {
+            header.classList.add('has-subdivisions');
+        }
+
+        if (isOrganization) {
+            header.classList.add('organization');
+        }
+        if (isGrouped) {
+            header.classList.add('grouped');
+        }
+        if (searchTerm && GetOptProperty(item, 'name', '').toLowerCase().indexOf(searchTerm.toLowerCase()) !== -1) {
+            header.classList.add('search-match');
+        }
+
+        var groupedItemsStr = GetOptProperty(item, 'grouped_items_str', '');
+        var groupCount = GetOptProperty(item, 'group_count', 0);
+
+        var toggleBtn = document.createElement('span');
+        toggleBtn.className = 'toggle-btn';
+        toggleBtn.textContent = hasChildren ? '>' : '';
+
+        var title = document.createElement('span');
+        title.textContent = GetOptProperty(item, 'name', '');
+
+        if (isGrouped && groupCount > 1) {
+            var badge = document.createElement('span');
+            badge.className = 'group-badge';
+            badge.textContent = groupCount + ' рег.';
+            title.appendChild(badge);
+        }
+
+        header.appendChild(toggleBtn);
+        header.appendChild(title);
+
+        if (!isOrganization) {
+            header.setAttribute('data-sub-id', item.id);
+        }
+
+        node.appendChild(header);
+
+        var content = document.createElement('div');
+        content.className = 'tree-node-content';
+        node.appendChild(content);
+
+        // Проверяем, что children — это массив и он не пустой
+        if (Array.isArray(children) && children.length > 0) {
+            renderTree(children, content, searchTerm);
+            if (hasChildren) {
+                content.classList.add('open');
+                header.classList.add('open');
+                toggleBtn.textContent = '▼';
+            }
+        }
+
+        (function(currentItem, currentToggleBtn, currentContent, currentHeader, currentGroupedItemsStr) {
+            var isOrg = GetOptProperty(currentItem, 'type', '') === 'organization';
+            var isGroupedNode = GetOptProperty(currentItem, 'is_grouped', false);
+            var subdivisionId = currentItem.id;
+            var subdivisionName = GetOptProperty(currentItem, 'name', '');
+            var hasChildrenLocal = GetOptProperty(currentItem, 'children', []).length > 0 || GetOptProperty(currentItem, 'has_subdivisions', false);
+
+            currentHeader.onclick = function(e) {
+                e.stopPropagation();
+                viewingStructure = true;
+
+                var isOpen = currentContent.classList.contains('open');
+                var shouldToggle = hasChildrenLocal || (isGroupedNode && currentContent.childElementCount > 0);
+
+                if (shouldToggle) {
+                    if (!isOpen) {
+                        currentContent.classList.add('open');
+                        currentHeader.classList.add('open');
+                        currentToggleBtn.textContent = '▼';
+
+                        if (currentContent.childElementCount === 0 || currentContent.querySelector('.loading')) {
+                            if (isOrg) {
+                                loadOrganizationChildren(subdivisionId, currentContent, currentToggleBtn);
+                            } else {
+                                loadSubdivisionData(subdivisionId, currentContent, currentToggleBtn, currentGroupedItemsStr, true);
+                            }
+                        }
+                    } else {
+                        currentContent.classList.remove('open');
+                        currentHeader.classList.remove('open');
+                        currentToggleBtn.textContent = '>';
+                    }
+                }
+
+                if (!isOrg) {
+                    document.querySelectorAll('.tree-node-header').forEach(function(h) {
+                        h.classList.remove('selected');
+                    });
+                    currentHeader.classList.add('selected');
+                    loadCollaboratorsForSubdivision(subdivisionId, subdivisionName, currentGroupedItemsStr);
+                }
+            };
+        })(item, toggleBtn, content, header, groupedItemsStr);
+
+        parentElement.appendChild(node);
+    }
+}
+
+
+
+
+    function loadSubdivisionData(subId, contentElement, toggleBtn, groupedItemsStr, isForTree) {
+        var loadKey = 'tree_' + subId;
+        if (loadingIds[loadKey]) return;
+        loadingIds[loadKey] = true;
+        
+        contentElement.innerHTML = '<div class="loading"><span class="loader"></span>Загрузка структуры...</div>';
+        
+        var url = '/custom_web_template.html?object_id=7560343309670892669&subdivision_id=' + subId;
+        if (groupedItemsStr) {
+            url += '&grouped_items=' + encodeURIComponent(groupedItemsStr);
+        }
+        
+        axios.get(url)
+            .then(function(response) {
+                var data = response.data;
+                delete loadingIds[loadKey];
+                
+                if (data.error || !data.subdivision) {
+                    contentElement.innerHTML = '<div style="color: red;">Ошибка: ' + (data.error || 'Нет данных') + '</div>';
+                    return;
+                }
+                
+                nodesData[subId] = { ...nodesData[subId], ...data.subdivision };
+                
+                contentElement.innerHTML = '';
+                if (data.subdivision.children && data.subdivision.children.length > 0) {
+                    renderTree(data.subdivision.children, contentElement, currentSearch);
+                    contentElement.classList.add('open');
+                    toggleBtn.textContent = '▼';
+                } else {
+                    toggleBtn.textContent = '';
+                    contentElement.classList.remove('open');
+                }
+            })
+            .catch(function(error) {
+                console.error('Error loading subdivision structure:', error);
+                contentElement.innerHTML = '<div style="color: red;">Ошибка: ' + error.message + '</div>';
+                delete loadingIds[loadKey];
+            });
+    }
+    
+
+    
+function loadCollaboratorsForSubdivision(subId, subName, groupedItemsStr, isLoadMore) {
+    if (!isLoadMore) {
+        currentSubdivisionId = subId;
+        currentGroupedItems = groupedItemsStr || '';
+        currentOffset = 0;
+        allLoadedCollaborators = [];
+        document.getElementById('selectedSubdivision').style.display = 'none';
+        document.getElementById('collaboratorList').innerHTML = '<li class="loading"><span class="loader"></span>Загрузка сотрудников...</li>';
+        
+        var frontendPath = buildFrontendPath(subId, subName);
+        document.getElementById('hierarchyPath').textContent = frontendPath;
+        
+        document.getElementById('statsInfo').style.display = 'none';
+    } else {
+        if (isLoadingMore) return;
+        isLoadingMore = true;
+    }
+    
+    var loadKey = 'collab_' + subId + '_' + currentOffset;
+    if (loadingIds[loadKey]) return;
+    loadingIds[loadKey] = true;
+    
+    var url = '/custom_web_template.html?object_id=7560343309670892669&subdivision_id=' + subId;
+    if (groupedItemsStr) {
+        url += '&grouped_items=' + encodeURIComponent(groupedItemsStr);
+    }
+    
+    url += '&include_all_collaborators=true';
+    url += '&offset=' + currentOffset;
+    url += '&limit=' + currentLimit;
+    
+axios.get(url)
+    .then(function(response) {
+        var data = response.data;
+        delete loadingIds[loadKey];
+        isLoadingMore = false;
+        
+        if (data.error || !data.subdivision) {
+            if (!isLoadMore) {
+                document.getElementById('collaboratorList').innerHTML = '<li>Ошибка загрузки</li>';
+                document.getElementById('hierarchyPath').textContent = '';
+            }
+            return;
+        }
+
+        var newCollaborators = GetOptProperty(data.subdivision, 'all_collaborators', []);
+        console.log('=== COLLABORATORS FOR: ' + subName + ' ===');
+        console.log('Total:', newCollaborators.length);
+        for (var i = 0; i < newCollaborators.length; i++) {
+            var col = newCollaborators[i];
+            console.log(i + ':', {
+                name: GetOptProperty(col, 'name', '-'),
+                subdivision_name: GetOptProperty(col, 'subdivision_name', '-'),
+                is_func_manager: GetOptProperty(col, 'is_func_manager', false),
+                position_name: GetOptProperty(col, 'position_name', '-')
+            });
+        }
+        console.log('===================');
+            
+            if (!isLoadMore) {
+                var hierarchyPath = GetOptProperty(data.subdivision, 'hierarchy_path', []);
+                if (hierarchyPath.length > 0) {
+                    var filteredPath = [];
+                    var hiddenPrefixes = ['обособленное подразделение', 'основное подразделение'];
+                    
+                    for (var p = 0; p < hierarchyPath.length; p++) {
+                        var pathItem = hierarchyPath[p];
+                        var isHidden = false;
+                        
+                        for (var h = 0; h < hiddenPrefixes.length; h++) {
+                            if (pathItem.toLowerCase().indexOf(hiddenPrefixes[h]) === 0) {
+                                isHidden = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!isHidden) {
+                            var cleanedItem = pathItem.replace(/\./g, '').replace(/▼/g, '').replace(/>/g, '').trim();
+                            filteredPath.push(cleanedItem);
+                        }
+                    }
+                    
+                    if (filteredPath.length > 0) {
+                        document.getElementById('hierarchyPath').textContent = filteredPath.join(' → ');
+                    }
+                }
+            }
+            
+            var newCollaborators = GetOptProperty(data.subdivision, 'all_collaborators', []);
+            totalCollaborators = GetOptProperty(data.subdivision, 'total_count', 0);
+            var hasMore = GetOptProperty(data.subdivision, 'has_more', false);
+            
+            for (var i = 0; i < newCollaborators.length; i++) {
+                allLoadedCollaborators.push(newCollaborators[i]);
+            }
+            
+            var collaboratorList = document.getElementById('collaboratorList');
+            var statsDiv = document.getElementById('statsInfo');
+            if (totalCollaborators > 0) {
+                statsDiv.textContent = 'Всего сотрудников: ' + totalCollaborators;
+                statsDiv.style.display = 'block';
+            } else {
+                statsDiv.style.display = 'none';
+            }
+            
+            collaboratorList.innerHTML = '';
+            
+            if (allLoadedCollaborators && allLoadedCollaborators.length > 0) {
+                var collaboratorsByNormalizedName = {};
+                var normalizedNamesOrder = [];
+                
+                for (var i = 0; i < allLoadedCollaborators.length; i++) {
+                    var col = allLoadedCollaborators[i];
+                    var normalizedName = GetOptProperty(col, 'dept_name_normalized', '');
+                    var subDivName = GetOptProperty(col, 'subdivision_name', 'Без подразделения');
+                    var regionalParentId = GetOptProperty(col, 'regional_parent_id', '');
+                    var regionalName = GetOptProperty(col, 'regional_name', '');
+                    
+                    // Фильтруем некорректный regional_name
+                    var hiddenPrefixes = ['департамент логистики']; // Добавьте сюда названия родительских подразделений
+                    var isInvalidRegionalName = hiddenPrefixes.some(prefix => regionalName.toLowerCase().includes(prefix.toLowerCase()));
+                    if (isInvalidRegionalName) {
+                        regionalName = subDivName; // Используем subdivision_name как fallback
+                    }
+                    
+                    var groupKey = normalizedName || subDivName;
+                    
+                    if (!collaboratorsByNormalizedName[groupKey]) {
+                        collaboratorsByNormalizedName[groupKey] = {
+                            displayName: subDivName,
+                            managers: [],
+                            regular: [],
+                            byRegional: {}
+                        };
+                        normalizedNamesOrder.push(groupKey);
+                    }
+                    
+                    if (regionalParentId !== '' && !isInvalidRegionalName) {
+                        if (!collaboratorsByNormalizedName[groupKey].byRegional[regionalParentId]) {
+                            collaboratorsByNormalizedName[groupKey].byRegional[regionalParentId] = {
+                                name: regionalName,
+                                managers: [],
+                                regular: []
+                            };
+                        }
+                        
+                        if (GetOptProperty(col, 'is_func_manager', false)) {
+                            collaboratorsByNormalizedName[groupKey].byRegional[regionalParentId].managers.push(col);
+                        } else {
+                            collaboratorsByNormalizedName[groupKey].byRegional[regionalParentId].regular.push(col);
+                        }
+                    } else {
+                        if (GetOptProperty(col, 'is_func_manager', false)) {
+                            collaboratorsByNormalizedName[groupKey].managers.push(col);
+                        } else {
+                            collaboratorsByNormalizedName[groupKey].regular.push(col);
+                        }
+                    }
+                }
+                
+                for (var s = 0; s < normalizedNamesOrder.length; s++) {
+                    var groupKey = normalizedNamesOrder[s];
+                    var groupData = collaboratorsByNormalizedName[groupKey];
+                    
+                    var subHeader = document.createElement('li');
+                    subHeader.className = 'regional-header';
+                    subHeader.textContent = groupData.displayName.replace(/\.*$/, '');
+                    collaboratorList.appendChild(subHeader);
+                    
+                    groupData.managers.sort(function(a, b) {
+                        return GetOptProperty(a, 'name_lower', '').localeCompare(GetOptProperty(b, 'name_lower', ''));
+                    });
+                    
+                    for (var m = 0; m < groupData.managers.length; m++) {
+                        var colElement = createCollaboratorElement(groupData.managers[m]);
+                        if (colElement) collaboratorList.appendChild(colElement);
+                    }
+                    
+                    groupData.regular.sort(function(a, b) {
+                        return GetOptProperty(a, 'name_lower', '').localeCompare(GetOptProperty(b, 'name_lower', ''));
+                    });
+                    
+                    for (var r = 0; r < groupData.regular.length; r++) {
+                        var colElement = createCollaboratorElement(groupData.regular[r]);
+                        if (colElement) collaboratorList.appendChild(colElement);
+                    }
+                    
+                    var regionalIds = Object.keys(groupData.byRegional);
+                    regionalIds.sort((a, b) => {
+                        var nameA = groupData.byRegional[a].name.toLowerCase();
+                        var nameB = groupData.byRegional[b].name.toLowerCase();
+                        return nameA.localeCompare(nameB);
+                    });
+                    
+                    for (var reg = 0; reg < regionalIds.length; reg++) {
+                        var regionalId = regionalIds[reg];
+                        var regionalData = groupData.byRegional[regionalId];
+                        
+                        var regionalSubHeader = document.createElement('li');
+                        regionalSubHeader.className = 'regional-subheader';
+                        regionalSubHeader.textContent = regionalData.name.replace(/\.*$/, '');
+                        collaboratorList.appendChild(regionalSubHeader);
+                        
+                        regionalData.managers.sort(function(a, b) {
+                            return GetOptProperty(a, 'name_lower', '').localeCompare(GetOptProperty(b, 'name_lower', ''));
+                        });
+                        
+                        for (var rm = 0; rm < regionalData.managers.length; rm++) {
+                            var colElement = createCollaboratorElement(regionalData.managers[rm]);
+                            if (colElement) collaboratorList.appendChild(colElement);
+                        }
+                        
+                        regionalData.regular.sort(function(a, b) {
+                            return GetOptProperty(a, 'name_lower', '').localeCompare(GetOptProperty(b, 'name_lower', ''));
+                        });
+                        
+                        for (var rr = 0; rr < regionalData.regular.length; rr++) {
+                            var colElement = createCollaboratorElement(regionalData.regular[rr]);
+                            if (colElement) collaboratorList.appendChild(colElement);
+                        }
+                    }
+                }
+                
+                currentOffset += newCollaborators.length;
+                
+                if (hasMore) {
+                    var loadMoreBtn = document.createElement('button');
+                    loadMoreBtn.id = 'loadMoreBtn';
+                    loadMoreBtn.className = 'load-more-btn';
+                    loadMoreBtn.textContent = 'Загрузить ещё (' + (totalCollaborators - currentOffset) + ' осталось)';
+                    loadMoreBtn.onclick = function() {
+                        loadCollaboratorsForSubdivision(currentSubdivisionId, subName, currentGroupedItems, true);
+                    };
+                    collaboratorList.appendChild(loadMoreBtn);
+                }
+            } else {
+                collaboratorList.innerHTML = '<li>Сотрудники отсутствуют</li>';
+            }
+        })
+        .catch(function(error) {
+            console.error('Error loading collaborators:', error);
+            if (!isLoadMore) {
+                document.getElementById('collaboratorList').innerHTML = '<li>Ошибка загрузки: ' + error.message + '</li>';
+                document.getElementById('hierarchyPath').textContent = '';
+            }
+            delete loadingIds[loadKey];
+            isLoadingMore = false;
+        });
+}
+
+
+function showCollaboratorsLoader() {
+    document.getElementById('collaboratorList').innerHTML = '<li class="loading"><span class="loader"></span>Загрузка сотрудников...</li>';
+    document.getElementById('hierarchyPath').textContent = '';
+    document.getElementById('statsInfo').style.display = 'none';
+}
+
+function buildFrontendPath(subId, subName) {
+    var pathItems = [];
+    var hiddenPrefixes = ['обособленное подразделение', 'основное подразделение'];
+    
+    var cleanSubName = subName.replace(/\./g, '').replace(/▼/g, '').replace(/>/g, '').trim();
+    
+    var element = document.querySelector('[data-sub-id="' + subId + '"]');
+    
+    if (element) {
+        var currentElement = element;
+        
+        while (currentElement) {
+            var isTreeNodeHeader = currentElement.classList && currentElement.classList.contains('tree-node-header');
+            
+            if (isTreeNodeHeader) {
+                var nodeName = currentElement.textContent.trim();
+                
+                nodeName = nodeName.replace(/\d+\s*рег\./g, '').trim();
+                nodeName = nodeName.replace(/\./g, '').replace(/▼/g, '').replace(/>/g, '').trim();
+                
+                var isHidden = false;
+                for (var h = 0; h < hiddenPrefixes.length; h++) {
+                    if (nodeName.toLowerCase().indexOf(hiddenPrefixes[h]) === 0) {
+                        isHidden = true;
+                        break;
+                    }
+                }
+                
+                if (!isHidden && nodeName !== '') {
+                    pathItems.unshift(nodeName);
+                }
+            }
+            
+            var parentTreeNode = currentElement.parentElement;
+            while (parentTreeNode && !parentTreeNode.classList.contains('tree-node')) {
+                parentTreeNode = parentTreeNode.parentElement;
+            }
+            
+            if (parentTreeNode) {
+                parentTreeNode = parentTreeNode.parentElement;
+                while (parentTreeNode && !parentTreeNode.classList.contains('tree-node')) {
+                    parentTreeNode = parentTreeNode.parentElement;
+                }
+                
+                if (parentTreeNode) {
+                    currentElement = parentTreeNode.querySelector('.tree-node-header');
+                } else {
+                    currentElement = null;
+                }
+            } else {
+                currentElement = null;
+            }
+        }
+    }
+    
+    if (pathItems.length === 0) {
+        return cleanSubName;
+    }
+    
+    return pathItems.join(' → ');
+}
+   
+function renderFilteredCollaborators(collaborators) {
+    viewingStructure = false;
+    document.querySelectorAll('.tree-node-header').forEach(function(h) {
+        h.classList.remove('selected');
+    });
+    document.getElementById('hierarchyPath').textContent = '';
+    var title = currentLetter ? 'Сотрудники по букве: ' + currentLetter : (currentSearch ? 'Сотрудники по поиску: ' + currentSearch : 'Сотрудники по фильтру');
+    document.getElementById('selectedSubdivision').style.display = 'block';
+    document.getElementById('selectedSubdivision').textContent = title + ' (' + collaborators.length + ')';
+    document.getElementById('statsInfo').style.display = 'none';
+    
+    var collaboratorList = document.getElementById('collaboratorList');
+    collaboratorList.innerHTML = '';
+    
+    if (collaborators && collaborators.length > 0) {
+        // Группируем по regional_parent_id для grouped подразделений
+        var groupedByRegional = {};
+        var regionalOrder = [];
+        
+        for (var i = 0; i < collaborators.length; i++) {
+            var col = collaborators[i];
+            if (!col || !GetOptProperty(col, 'id', '')) continue;
+            
+            var regionalParentId = GetOptProperty(col, 'regional_parent_id', '');
+            var regionalName = GetOptProperty(col, 'regional_name', 'Без региона');
+            
+            // Если есть regional_parent_id - группируем
+            if (regionalParentId !== '') {
+                if (!groupedByRegional[regionalParentId]) {
+                    groupedByRegional[regionalParentId] = {
+                        name: regionalName,
+                        collaborators: []
+                    };
+                    regionalOrder.push(regionalParentId);
+                }
+                groupedByRegional[regionalParentId].collaborators.push(col);
+            } else {
+                // Без группировки - отображаем как обычно
+                collaboratorList.appendChild(createCollaboratorElement(col));
+            }
+        }
+        
+        // Отображаем сгруппированных сотрудников
+        for (var r = 0; r < regionalOrder.length; r++) {
+            var regionalId = regionalOrder[r];
+            var regionalData = groupedByRegional[regionalId];
+            
+            // Создаем заголовок региона
+            var regionalHeader = document.createElement('li');
+            regionalHeader.className = 'regional-header';
+            regionalHeader.textContent = regionalData.name.replace(/\.*$/, '');
+            collaboratorList.appendChild(regionalHeader);
+            
+            // Добавляем сотрудников этого региона
+            for (var c = 0; c < regionalData.collaborators.length; c++) {
+                var colElement = createCollaboratorElement(regionalData.collaborators[c]);
+                if (colElement) collaboratorList.appendChild(colElement);
+            }
+        }
+        
+    } else {
+        collaboratorList.innerHTML = '<li>Сотрудники отсутствуют</li>';
+    }
+}
+    
+    function updateLetterFilter() {
+        document.querySelectorAll('.letter-btn').forEach(function(btn) {
+            btn.classList.remove('active');
+            if (btn.getAttribute('data-letter') === currentLetter) {
+                btn.classList.add('active');
+            }
+        });
+    }
+    
+function loadData() {
+
+    if (currentLetter || currentSearch) {
+        showCollaboratorsLoader();
+    }
+    
+    var url = '/custom_web_template.html?object_id=7560343309670892669';
+    if (currentLetter) url += '&letter=' + encodeURIComponent(currentLetter);
+    if (currentSearch) url += '&search=' + encodeURIComponent(currentSearch);
+    axios.get(url)
+        .then(function(response) {
+            var data = response.data;
+           console.log('Subdivision data for subId' + JSON.stringify(data));
+            if (data.error) {
+                document.getElementById('tree').innerHTML = '<div style="color: red;">Ошибка: ' + data.error + '</div>';
+                document.getElementById('collaboratorList').innerHTML = '<li>Ошибка: ' + data.error + '</li>';
+                return;
+            }
+            
+            document.getElementById('tree').innerHTML = '';
+            if (data.structure && Array.isArray(data.structure)) {
+                renderTree(data.structure, document.getElementById('tree'), currentSearch);
+            } else {
+                document.getElementById('tree').innerHTML = '<div style="color: red;">Нет данных структуры</div>';
+            }
+            
+            if (data.filtered_collaborators && (currentLetter || currentSearch)) {
+                renderFilteredCollaborators(data.filtered_collaborators);
+            } else {
+
+    if (!currentLetter && !currentSearch) {
+        document.getElementById('selectedSubdivision').style.display = 'block';
+        document.getElementById('selectedSubdivision').textContent = 'Выберите организацию';
+    }
+    document.getElementById('hierarchyPath').textContent = '';
+    document.getElementById('statsInfo').style.display = 'none';
+}
+            updateLetterFilter();
+        })
+        .catch(function(error) {
+            console.error('Error loading data:', error);
+            document.getElementById('tree').innerHTML = '<div style="color: red;">Ошибка загрузки: ' + error.message + '</div>';
+            document.getElementById('collaboratorList').innerHTML = '<li>Ошибка загрузки: ' + error.message + '</li>';
+        });
+}
+    
+    function filterByLetter(letter) {
+        currentLetter = letter;
+        currentSearch = '';
+        viewingStructure = false;
+        document.getElementById('searchInput').value = '';
+        document.querySelectorAll('.tree-node-header').forEach(function(h) {
+            h.classList.remove('selected');
+        });
+        loadData();
+    }
+    
+    function resetFilters() {
+        currentLetter = '';
+        currentSearch = '';
+        viewingStructure = true;
+        document.getElementById('searchInput').value = '';
+        document.getElementById('selectedSubdivision').style.display = 'block';
+document.getElementById('selectedSubdivision').textContent = 'Выберите организацию';
+        document.getElementById('collaboratorList').innerHTML = '';
+        document.getElementById('hierarchyPath').textContent = '';
+        document.getElementById('statsInfo').style.display = 'none';
+        document.querySelectorAll('.tree-node-header').forEach(function(h) {
+            h.classList.remove('selected');
+        });
+        updateLetterFilter();
+        loadData();
+    }
+    
+    function debounce(func, wait) {
+        return function() {
+            var context = this;
+            var args = arguments;
+            clearTimeout(debounceTimeout);
+            debounceTimeout = setTimeout(function() {
+                func.apply(context, args);
+            }, wait);
+        };
+    }
+    
+    document.getElementById('searchInput').addEventListener('input', debounce(function() {
+        currentSearch = this.value ? this.value.trim() : '';
+        currentLetter = '';
+        viewingStructure = false;
+        document.querySelectorAll('.tree-node-header').forEach(function(h) {
+            h.classList.remove('selected');
+        });
+        loadData();
+    }, 750));
+    
+    loadData();
+</script>
