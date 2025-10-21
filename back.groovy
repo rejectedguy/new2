@@ -1892,11 +1892,70 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
                 grouped_data.SetProperty('grouped_items_str', grouped_ids_str);
                 grouped_data.SetProperty('children', []);
 
-                // Загружаем сотрудников для всех подразделений в группе
+                // Загружаем сотрудников для всех подразделений в группе (со ВСЕХ УРОВНЕЙ)
                 grouped_collaborators = [];
+                added_person_ids_in_group = new Object(); // Для предотвращения дубликатов
+
                 for (j = 0; j < ArrayCount(dept_group); j++) {
                     try {
                         dept_id_for_collab = String(dept_group[j].id);
+                        regional_name_grouped = String(dept_group[j].regional_parent_name);
+
+                        // === УРОВЕНЬ 0: Прямые сотрудники родительского подразделения ===
+                        col_query_parent = "for $elem in collaborators where $elem/position_parent_id = " + dept_id_for_collab + " and $elem/is_dismiss = false() return $elem";
+                        col_list_parent = ArraySelectAll(tools.xquery(col_query_parent));
+
+                        // === УРОВЕНЬ 1: Получаем дочерние подразделения ===
+                        children_query_grouped = "for $elem in subdivisions where $elem/parent_object_id = " + dept_id_for_collab + " and $elem/is_disbanded != true() return $elem";
+                        children_list_grouped = ArraySelectAll(tools.xquery(children_query_grouped));
+
+                        // Загружаем сотрудников из дочерних подразделений (уровень 1)
+                        col_list_children = [];
+                        for (child_g in children_list_grouped) {
+                            try {
+                                child_col_query = "for $elem in collaborators where $elem/position_parent_id = " + String(child_g.id) + " and $elem/is_dismiss = false() return $elem";
+                                child_cols = ArraySelectAll(tools.xquery(child_col_query));
+                                for (cc in child_cols) {
+                                    col_list_children.push(cc);
+                                }
+                            } catch(childErr) {}
+                        }
+
+                        // === УРОВЕНЬ 2: Получаем внуков ===
+                        grandchildren_list_grouped = [];
+                        for (child_g in children_list_grouped) {
+                            try {
+                                gc_query = "for $elem in subdivisions where $elem/parent_object_id = " + String(child_g.id) + " and $elem/is_disbanded != true() return $elem";
+                                gcs = ArraySelectAll(tools.xquery(gc_query));
+                                for (gc in gcs) {
+                                    grandchildren_list_grouped.push(gc);
+                                }
+                            } catch(gcErr) {}
+                        }
+
+                        // Загружаем сотрудников из внуков (уровень 2)
+                        col_list_grandchildren = [];
+                        for (gc_g in grandchildren_list_grouped) {
+                            try {
+                                gc_col_query = "for $elem in collaborators where $elem/position_parent_id = " + String(gc_g.id) + " and $elem/is_dismiss = false() return $elem";
+                                gc_cols = ArraySelectAll(tools.xquery(gc_col_query));
+                                for (gcc in gc_cols) {
+                                    col_list_grandchildren.push(gcc);
+                                }
+                            } catch(gcColErr) {}
+                        }
+
+                        // Объединяем всех сотрудников
+                        col_list_grouped = [];
+                        for (cp in col_list_parent) {
+                            col_list_grouped.push(cp);
+                        }
+                        for (cc in col_list_children) {
+                            col_list_grouped.push(cc);
+                        }
+                        for (cgc in col_list_grandchildren) {
+                            col_list_grouped.push(cgc);
+                        }
 
                         // Загружаем функционального руководителя
                         func_manager_id_grouped = '';
@@ -1904,14 +1963,8 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
                             func_manager_id_grouped = getFuncManagerForSubdivision(dept_id_for_collab);
                         } catch(fmErr) {}
 
-                        // Загружаем сотрудников подразделения
-                        col_query_grouped = "for $elem in collaborators where $elem/position_parent_id = " + dept_id_for_collab + " and $elem/is_dismiss = false() return $elem";
-                        col_list_grouped = ArraySelectAll(tools.xquery(col_query_grouped));
-
-                        regional_name_grouped = String(dept_group[j].regional_parent_name);
-
                         // Добавляем функционального руководителя если есть
-                        if (func_manager_id_grouped != '') {
+                        if (func_manager_id_grouped != '' && !added_person_ids_in_group.HasProperty(func_manager_id_grouped)) {
                             try {
                                 func_manager_query_grouped = "for $elem in collaborators where $elem/id = " + func_manager_id_grouped + " and $elem/is_dismiss = false() return $elem";
                                 func_manager_result_grouped = ArraySelectAll(tools.xquery(func_manager_query_grouped));
@@ -1937,6 +1990,7 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
                                     fm_data_grouped.SetProperty('is_func_manager', true);
 
                                     grouped_collaborators.push(fm_data_grouped);
+                                    added_person_ids_in_group.SetProperty(func_manager_id_grouped, true);
                                 }
                             } catch(fmErrGrouped) {}
                         }
@@ -1945,13 +1999,17 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
                         for (col_elem_grouped in col_list_grouped) {
                             try {
                                 if (!col_elem_grouped.id || col_elem_grouped.id == '') continue;
-                                if (func_manager_id_grouped != '' && String(col_elem_grouped.id) == func_manager_id_grouped) continue;
+
+                                person_id_grouped = String(col_elem_grouped.id);
+
+                                // Пропускаем дубликаты
+                                if (added_person_ids_in_group.HasProperty(person_id_grouped)) continue;
 
                                 is_birthday_grouped = checkBirthday(col_elem_grouped.birth_date);
                                 is_on_vacation_grouped = (String(col_elem_grouped.current_state) == 'Отпуск');
 
                                 col_data_grouped = new Object();
-                                col_data_grouped.SetProperty('id', String(col_elem_grouped.id));
+                                col_data_grouped.SetProperty('id', person_id_grouped);
                                 col_data_grouped.SetProperty('name', String(col_elem_grouped.fullname));
                                 col_data_grouped.SetProperty('name_lower', StrLowerCase(String(col_elem_grouped.fullname)));
                                 col_data_grouped.SetProperty('subdivision_id', String(col_elem_grouped.position_parent_id));
@@ -1966,6 +2024,7 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
                                 col_data_grouped.SetProperty('is_func_manager', false);
 
                                 grouped_collaborators.push(col_data_grouped);
+                                added_person_ids_in_group.SetProperty(person_id_grouped, true);
                             } catch(colErrGrouped) {}
                         }
                     } catch(deptCollabErr) {}
