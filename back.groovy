@@ -1891,7 +1891,87 @@ if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
                 grouped_data.SetProperty('has_subdivisions', has_real_children);
                 grouped_data.SetProperty('grouped_items_str', grouped_ids_str);
                 grouped_data.SetProperty('children', []);
-                grouped_data.SetProperty('collaborators', []);
+
+                // Загружаем сотрудников для всех подразделений в группе
+                grouped_collaborators = [];
+                for (j = 0; j < ArrayCount(dept_group); j++) {
+                    try {
+                        dept_id_for_collab = String(dept_group[j].id);
+
+                        // Загружаем функционального руководителя
+                        func_manager_id_grouped = '';
+                        try {
+                            func_manager_id_grouped = getFuncManagerForSubdivision(dept_id_for_collab);
+                        } catch(fmErr) {}
+
+                        // Загружаем сотрудников подразделения
+                        col_query_grouped = "for $elem in collaborators where $elem/position_parent_id = " + dept_id_for_collab + " and $elem/is_dismiss = false() return $elem";
+                        col_list_grouped = ArraySelectAll(tools.xquery(col_query_grouped));
+
+                        regional_name_grouped = String(dept_group[j].regional_parent_name);
+
+                        // Добавляем функционального руководителя если есть
+                        if (func_manager_id_grouped != '') {
+                            try {
+                                func_manager_query_grouped = "for $elem in collaborators where $elem/id = " + func_manager_id_grouped + " and $elem/is_dismiss = false() return $elem";
+                                func_manager_result_grouped = ArraySelectAll(tools.xquery(func_manager_query_grouped));
+
+                                if (ArrayCount(func_manager_result_grouped) > 0) {
+                                    fm_elem_grouped = func_manager_result_grouped[0];
+                                    is_birthday_fm_grouped = checkBirthday(fm_elem_grouped.birth_date);
+                                    is_on_vacation_fm_grouped = (String(fm_elem_grouped.current_state) == 'Отпуск');
+
+                                    fm_data_grouped = new Object();
+                                    fm_data_grouped.SetProperty('id', String(fm_elem_grouped.id));
+                                    fm_data_grouped.SetProperty('name', String(fm_elem_grouped.fullname));
+                                    fm_data_grouped.SetProperty('name_lower', StrLowerCase(String(fm_elem_grouped.fullname)));
+                                    fm_data_grouped.SetProperty('subdivision_id', String(fm_elem_grouped.position_parent_id));
+                                    fm_data_grouped.SetProperty('subdivision_name', regional_name_grouped);
+                                    fm_data_grouped.SetProperty('email', String(fm_elem_grouped.email != null ? fm_elem_grouped.email : '—'));
+                                    fm_data_grouped.SetProperty('pict_url', String(fm_elem_grouped.pict_url != null ? fm_elem_grouped.pict_url : ''));
+                                    fm_data_grouped.SetProperty('position_name', String(fm_elem_grouped.position_name != null ? fm_elem_grouped.position_name : '—'));
+                                    fm_data_grouped.SetProperty('mobile_phone', String(fm_elem_grouped.mobile_phone != null ? fm_elem_grouped.mobile_phone : '—'));
+                                    fm_data_grouped.SetProperty('phone', String(fm_elem_grouped.phone != null ? fm_elem_grouped.phone : '—'));
+                                    fm_data_grouped.SetProperty('is_birthday', is_birthday_fm_grouped);
+                                    fm_data_grouped.SetProperty('is_on_vacation', is_on_vacation_fm_grouped);
+                                    fm_data_grouped.SetProperty('is_func_manager', true);
+
+                                    grouped_collaborators.push(fm_data_grouped);
+                                }
+                            } catch(fmErrGrouped) {}
+                        }
+
+                        // Добавляем обычных сотрудников
+                        for (col_elem_grouped in col_list_grouped) {
+                            try {
+                                if (!col_elem_grouped.id || col_elem_grouped.id == '') continue;
+                                if (func_manager_id_grouped != '' && String(col_elem_grouped.id) == func_manager_id_grouped) continue;
+
+                                is_birthday_grouped = checkBirthday(col_elem_grouped.birth_date);
+                                is_on_vacation_grouped = (String(col_elem_grouped.current_state) == 'Отпуск');
+
+                                col_data_grouped = new Object();
+                                col_data_grouped.SetProperty('id', String(col_elem_grouped.id));
+                                col_data_grouped.SetProperty('name', String(col_elem_grouped.fullname));
+                                col_data_grouped.SetProperty('name_lower', StrLowerCase(String(col_elem_grouped.fullname)));
+                                col_data_grouped.SetProperty('subdivision_id', String(col_elem_grouped.position_parent_id));
+                                col_data_grouped.SetProperty('subdivision_name', regional_name_grouped);
+                                col_data_grouped.SetProperty('email', String(col_elem_grouped.email != null ? col_elem_grouped.email : '—'));
+                                col_data_grouped.SetProperty('pict_url', String(col_elem_grouped.pict_url != null ? col_elem_grouped.pict_url : ''));
+                                col_data_grouped.SetProperty('position_name', String(col_elem_grouped.position_name != null ? col_elem_grouped.position_name : '—'));
+                                col_data_grouped.SetProperty('mobile_phone', String(col_elem_grouped.mobile_phone != null ? col_elem_grouped.mobile_phone : '—'));
+                                col_data_grouped.SetProperty('phone', String(col_elem_grouped.phone != null ? col_elem_grouped.phone : '—'));
+                                col_data_grouped.SetProperty('is_birthday', is_birthday_grouped);
+                                col_data_grouped.SetProperty('is_on_vacation', is_on_vacation_grouped);
+                                col_data_grouped.SetProperty('is_func_manager', false);
+
+                                grouped_collaborators.push(col_data_grouped);
+                            } catch(colErrGrouped) {}
+                        }
+                    } catch(deptCollabErr) {}
+                }
+
+                grouped_data.SetProperty('collaborators', grouped_collaborators);
                 structure_array.push(grouped_data);
             } catch(groupErr) {}
         }
