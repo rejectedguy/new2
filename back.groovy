@@ -522,5 +522,711 @@ function isPersonFuncManager(person_id) {
     return false;
 }
 
+// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ УМЕНЬШЕНИЯ ДУБЛИРОВАНИЯ ===
+
+// Функция поиска territorial (скрытого) родителя - используется много раз в коде
+function findTerritorialParent(sub_id, max_depth) {
+    if (max_depth == undefined) max_depth = 10;
+
+    regional_name = '';
+    regional_parent_id_str = '';
+
+    try {
+        sub_query = "for $elem in subdivisions where $elem/id = " + sub_id + " return $elem";
+        sub_result = ArraySelectAll(tools.xquery(sub_query));
+
+        if (ArrayCount(sub_result) == 0) {
+            return {name: regional_name, id: regional_parent_id_str};
+        }
+
+        current_check_sub = sub_result[0];
+        search_depth = 0;
+        found_territorial = false;
+
+        while (search_depth < max_depth && !found_territorial) {
+            search_depth++;
+            check_parent_id = String(current_check_sub.parent_object_id);
+
+            if (check_parent_id == '' || check_parent_id == null) break;
+
+            check_parent_query = "for $elem in subdivisions where $elem/id = " + check_parent_id + " return $elem";
+            check_parent_result = ArraySelectAll(tools.xquery(check_parent_query));
+
+            if (ArrayCount(check_parent_result) > 0) {
+                check_parent_name = String(check_parent_result[0].name);
+
+                if (startsWithHiddenPrefix(check_parent_name)) {
+                    regional_name = check_parent_name;
+                    regional_parent_id_str = check_parent_id;
+                    found_territorial = true;
+                    result.GetOptProperty('debug').push('Found territorial at depth ' + search_depth + ': ' + regional_name);
+                    break;
+                }
+
+                current_check_sub = check_parent_result[0];
+            } else {
+                break;
+            }
+        }
+
+        if (!found_territorial) {
+            result.GetOptProperty('debug').push('No territorial found for sub ' + sub_id);
+        }
+    } catch(regErr) {
+        result.GetOptProperty('debug').push('Error finding territorial: ' + String(regErr));
+    }
+
+    return {name: regional_name, id: regional_parent_id_str};
+}
+
+// === ФУНКЦИЯ ЗАГРУЗКИ СОТРУДНИКОВ С ПАГИНАЦИЕЙ ===
+function getAllCollaboratorsPaginated(sub_id, offset, limit) {
+    result.GetOptProperty('debug').push('Paginated load: sub_id=' + sub_id + ', offset=' + offset + ', limit=' + limit);
+
+    all_collaborators = [];
+    total_count = 0;
+
+    try {
+        // 1. Получаем ТОЛЬКО прямых сотрудников текущего подразделения
+        direct_col_query = "for $elem in collaborators where $elem/position_parent_id = " + sub_id + " and $elem/is_dismiss = false() return $elem";
+        direct_collaborators = ArraySelectAll(tools.xquery(direct_col_query));
+
+        // 2. Получаем ТОЛЬКО прямые дочерние подразделения (уровень 1)
+        children_query = "for $elem in subdivisions where $elem/parent_object_id = " + sub_id + " and $elem/is_disbanded != true() return $elem";
+        children_list = ArraySelectAll(tools.xquery(children_query));
+
+        // 3. Получаем подразделения уровня 2 (внуки)
+        grandchildren_list = [];
+        for (child in children_list) {
+            try {
+                grandchildren_query = "for $elem in subdivisions where $elem/parent_object_id = " + String(child.id) + " and $elem/is_disbanded != true() return $elem";
+                grandchildren = ArraySelectAll(tools.xquery(grandchildren_query));
+
+                for (grandchild in grandchildren) {
+                    grandchildren_list.push(grandchild);
+                }
+            } catch(gcErr) {
+                result.GetOptProperty('debug').push('Error loading grandchildren for ' + String(child.id) + ': ' + String(gcErr));
+            }
+        }
+
+        result.GetOptProperty('debug').push('Direct collaborators: ' + ArrayCount(direct_collaborators));
+        result.GetOptProperty('debug').push('Level 1 children: ' + ArrayCount(children_list));
+        result.GetOptProperty('debug').push('Level 2 children (grandchildren): ' + ArrayCount(grandchildren_list));
+
+        // 4. Получаем сотрудников из прямых дочерних подразделений (уровень 1)
+        children_collaborators = [];
+        for (child in children_list) {
+            try {
+                child_col_query = "for $elem in collaborators where $elem/position_parent_id = " + String(child.id) + " and $elem/is_dismiss = false() return $elem";
+                child_cols = ArraySelectAll(tools.xquery(child_col_query));
+
+                for (child_col in child_cols) {
+                    children_collaborators.push(child_col);
+                }
+            } catch(childErr) {}
+        }
+
+        // 5. Получаем сотрудников из внуков (уровень 2)
+        grandchildren_collaborators = [];
+        for (grandchild in grandchildren_list) {
+            try {
+                gc_col_query = "for $elem in collaborators where $elem/position_parent_id = " + String(grandchild.id) + " and $elem/is_dismiss = false() return $elem";
+                gc_cols = ArraySelectAll(tools.xquery(gc_col_query));
+
+                for (gc_col in gc_cols) {
+                    grandchildren_collaborators.push(gc_col);
+                }
+            } catch(gcColErr) {}
+        }
+
+        result.GetOptProperty('debug').push('Children collaborators: ' + ArrayCount(children_collaborators));
+        result.GetOptProperty('debug').push('Grandchildren collaborators: ' + ArrayCount(grandchildren_collaborators));
+
+        // 6. ГРУППИРУЕМ ПО ПОДРАЗДЕЛЕНИЯМ С СОХРАНЕНИЕМ ПОРЯДКА
+        collaborators_by_subdivision = new Object();
+
+        // Руководитель родительского подразделения
+        func_manager_id = getFuncManagerForSubdivision(sub_id);
+        result.GetOptProperty('debug').push('Func manager ID: ' + func_manager_id);
+
+        // Собираем руководителей всех дочерних подразделений (уровень 1)
+        child_func_managers = new Object();
+        for (child in children_list) {
+            try {
+                child_id_str = String(child.id);
+                child_fm_id = getFuncManagerForSubdivision(child_id_str);
+                if (child_fm_id != '') {
+                    child_func_managers.SetProperty(child_fm_id, true);
+                    result.GetOptProperty('debug').push('Child func manager found: ' + child_fm_id + ' for subdivision: ' + child_id_str);
+                }
+            } catch(e) {}
+        }
+
+        // Собираем руководителей внуков (уровень 2)
+        grandchild_func_managers = new Object();
+        for (grandchild in grandchildren_list) {
+            try {
+                gc_id_str = String(grandchild.id);
+                gc_fm_id = getFuncManagerForSubdivision(gc_id_str);
+                if (gc_fm_id != '') {
+                    grandchild_func_managers.SetProperty(gc_fm_id, true);
+                    result.GetOptProperty('debug').push('Grandchild func manager found: ' + gc_fm_id + ' for subdivision: ' + gc_id_str);
+                }
+            } catch(e) {}
+        }
+
+        // СНАЧАЛА обрабатываем прямых сотрудников родителя, ИСКЛЮЧАЯ функционального менеджера
+        parent_sub_id = String(sub_id);
+        if (!collaborators_by_subdivision.HasProperty(parent_sub_id)) {
+            collaborators_by_subdivision.SetProperty(parent_sub_id, []);
+        }
+
+        for (col in direct_collaborators) {
+            try {
+                if (!col.id || col.id == '') continue;
+                if (String(col.id) == func_manager_id) continue; // Пропускаем функционального менеджера
+                collaborators_by_subdivision.GetOptProperty(parent_sub_id).push(col);
+            } catch(e) {}
+        }
+
+        // ПОТОМ обрабатываем сотрудников из дочерних подразделений уровня 1
+        for (child in children_list) {
+            try {
+                child_id_str = String(child.id);
+                if (!collaborators_by_subdivision.HasProperty(child_id_str)) {
+                    collaborators_by_subdivision.SetProperty(child_id_str, []);
+                }
+
+                for (col in children_collaborators) {
+                    if (String(col.position_parent_id) == child_id_str) {
+                        collaborators_by_subdivision.GetOptProperty(child_id_str).push(col);
+                    }
+                }
+            } catch(e) {}
+        }
+
+        // И НАКОНЕЦ обрабатываем сотрудников из внуков (уровень 2)
+        for (grandchild in grandchildren_list) {
+            try {
+                gc_id_str = String(grandchild.id);
+                if (!collaborators_by_subdivision.HasProperty(gc_id_str)) {
+                    collaborators_by_subdivision.SetProperty(gc_id_str, []);
+                }
+
+                for (col in grandchildren_collaborators) {
+                    if (String(col.position_parent_id) == gc_id_str) {
+                        collaborators_by_subdivision.GetOptProperty(gc_id_str).push(col);
+                    }
+                }
+            } catch(e) {}
+        }
+
+        temp_all = [];
+
+        // Добавляем функционального менеджера в начало temp_all
+        if (func_manager_id != '') {
+            try {
+                func_manager_full_query = "for $elem in collaborators where $elem/id = " + func_manager_id + " and $elem/is_dismiss = false() return $elem";
+                func_manager_data_result = ArraySelectAll(tools.xquery(func_manager_full_query));
+
+                if (ArrayCount(func_manager_data_result) > 0) {
+                    fm_elem = func_manager_data_result[0];
+                    temp_all.push(fm_elem); // Добавляем в начало
+                    result.GetOptProperty('debug').push('Added func manager to temp_all: ' + func_manager_id + ', name=' + String(fm_elem.fullname));
+                } else {
+                    result.GetOptProperty('debug').push('Func manager ' + func_manager_id + ' not found or dismissed');
+                }
+            } catch(fmErr) {
+                result.GetOptProperty('debug').push('Error adding func manager to temp_all: ' + String(fmErr));
+            }
+        }
+
+        // Добавляем сотрудников родителя
+        if (collaborators_by_subdivision.HasProperty(parent_sub_id)) {
+            parent_cols = collaborators_by_subdivision.GetOptProperty(parent_sub_id);
+            for (col in parent_cols) {
+                temp_all.push(col);
+            }
+        }
+
+        // Добавляем сотрудников дочерних отделов уровня 1 СТРОГО В ПОРЯДКЕ children_list
+        for (child in children_list) {
+            try {
+                child_id_str = String(child.id);
+                if (collaborators_by_subdivision.HasProperty(child_id_str)) {
+                    child_cols = collaborators_by_subdivision.GetOptProperty(child_id_str);
+                    for (col in child_cols) {
+                        temp_all.push(col);
+                    }
+                }
+            } catch(e) {}
+        }
+
+        // Добавляем сотрудников внуков уровня 2 СТРОГО В ПОРЯДКЕ grandchildren_list
+        for (grandchild in grandchildren_list) {
+            try {
+                gc_id_str = String(grandchild.id);
+                if (collaborators_by_subdivision.HasProperty(gc_id_str)) {
+                    gc_cols = collaborators_by_subdivision.GetOptProperty(gc_id_str);
+                    for (col in gc_cols) {
+                        temp_all.push(col);
+                    }
+                }
+            } catch(e) {}
+        }
+
+        total_count = ArrayCount(temp_all);
+        result.GetOptProperty('debug').push('Total before pagination: ' + total_count);
+
+        // 7. Применяем пагинацию и форматируем
+        start_index = offset;
+        end_index = offset + limit;
+        if (end_index > total_count) end_index = total_count;
+
+        for (i = start_index; i < end_index; i++) {
+            col_elem = temp_all[i];
+
+            try {
+                if (!col_elem.id || col_elem.id == '') continue;
+
+                is_birthday = checkBirthday(col_elem.birth_date);
+                is_on_vacation = (String(col_elem.current_state) == 'Отпуск');
+
+                // Проверяем: это руководитель родителя ИЛИ руководитель дочернего подразделения ИЛИ внука
+                is_func_mgr = (func_manager_id != '' && String(col_elem.id) == func_manager_id) ||
+                              child_func_managers.HasProperty(String(col_elem.id)) ||
+                              grandchild_func_managers.HasProperty(String(col_elem.id));
+
+                // Получаем имя подразделения
+                col_subdivision_name = '';
+                if (String(col_elem.id) == func_manager_id) {
+                    // Для функционального менеджера используем имя текущего подразделения
+                    col_sub_query = "for $elem in subdivisions where $elem/id = " + sub_id + " return $elem";
+                    col_sub_result = ArraySelectAll(tools.xquery(col_sub_query));
+                    if (ArrayCount(col_sub_result) > 0) {
+                        colSubName = getSubNameById(sub_id);
+                        if (colSubName == null) {
+                            colSubName = String(col_sub_result[0].name);
+                        }
+                        col_subdivision_name = colSubName;
+                    } else {
+                        result.GetOptProperty('debug').push('No subdivision found for sub_id=' + sub_id);
+                    }
+                } else {
+                    col_sub_query = "for $elem in subdivisions where $elem/id = " + String(col_elem.position_parent_id) + " return $elem";
+                    col_sub_result = ArraySelectAll(tools.xquery(col_sub_query));
+                    if (ArrayCount(col_sub_result) > 0) {
+                        colSubName = getSubNameById(String(col_elem.position_parent_id));
+                        if (colSubName == null) {
+                            colSubName = String(col_sub_result[0].name);
+                        }
+                        col_subdivision_name = colSubName;
+                    } else {
+                        result.GetOptProperty('debug').push('No subdivision found for position_parent_id=' + String(col_elem.position_parent_id));
+                    }
+                }
+
+                col_data = new Object();
+                col_data.SetProperty('id', String(col_elem.id));
+                col_data.SetProperty('name', String(col_elem.fullname));
+                col_data.SetProperty('name_lower', StrLowerCase(String(col_elem.fullname)));
+                col_data.SetProperty('subdivision_id', String(col_elem.position_parent_id));
+                col_data.SetProperty('subdivision_name', col_subdivision_name);
+                col_data.SetProperty('email', String(col_elem.email != null ? col_elem.email : '—'));
+                col_data.SetProperty('pict_url', String(col_elem.pict_url != null ? col_elem.pict_url : ''));
+                col_data.SetProperty('position_name', String(col_elem.position_name != null ? col_elem.position_name : '—'));
+                col_data.SetProperty('mobile_phone', String(col_elem.mobile_phone != null ? col_elem.mobile_phone : '—'));
+                col_data.SetProperty('phone', String(col_elem.phone != null ? col_elem.phone : '—'));
+                col_data.SetProperty('is_birthday', is_birthday);
+                col_data.SetProperty('is_on_vacation', is_on_vacation);
+                col_data.SetProperty('is_func_manager', is_func_mgr);
+                col_data.SetProperty('dept_name_normalized', normalizeSubdivisionName(col_subdivision_name));
+
+                // РЕКУРСИВНЫЙ ПОИСК скрытого territorial подразделения
+                try {
+                    col_pos_parent_id = String(col_elem.position_parent_id);
+                    col_sub_detail_query = "for $elem in subdivisions where $elem/id = " + col_pos_parent_id + " return $elem";
+                    col_sub_detail_result = ArraySelectAll(tools.xquery(col_sub_detail_query));
+
+                    if (ArrayCount(col_sub_detail_result) > 0) {
+                        current_sub = col_sub_detail_result[0];
+                        check_depth = 0;
+                        found_regional = false;
+
+                        while (check_depth < 10 && !found_regional) {
+                            check_depth++;
+                            col_parent_id = String(current_sub.parent_object_id);
+
+                            if (col_parent_id == '' || col_parent_id == null) break;
+
+                            col_parent_query = "for $elem in subdivisions where $elem/id = " + col_parent_id + " return $elem";
+                            col_parent_result = ArraySelectAll(tools.xquery(col_parent_query));
+
+                            if (ArrayCount(col_parent_result) > 0) {
+                                col_parent_name = String(col_parent_result[0].name);
+
+                                if (startsWithHiddenPrefix(col_parent_name)) {
+                                    col_data.SetProperty('regional_name', col_parent_name);
+                                    col_data.SetProperty('regional_parent_id', col_parent_id);
+                                    col_data.SetProperty('original_dept_id', col_pos_parent_id);
+                                    found_regional = true;
+                                    result.GetOptProperty('debug').push('Found regional for ' + String(col_elem.id) + ' at depth ' + check_depth + ': ' + col_parent_name);
+                                    break;
+                                }
+
+                                current_sub = col_parent_result[0];
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                } catch(regional_err) {
+                    result.GetOptProperty('debug').push('Error checking regional for col ' + String(col_elem.id) + ': ' + String(regional_err));
+                }
+
+                all_collaborators.push(col_data);
+                result.GetOptProperty('debug').push('Added collaborator: id=' + String(col_elem.id) + ', name=' + String(col_elem.fullname) + ', is_func_manager=' + is_func_mgr + ', subdivision_name=' + col_subdivision_name);
+            } catch(colErr) {
+                result.GetOptProperty('debug').push('Error processing collaborator ' + String(col_elem.id) + ': ' + String(colErr));
+            }
+        }
+
+        result.GetOptProperty('debug').push('Returned collaborators: ' + ArrayCount(all_collaborators));
+
+    } catch(getAllErr) {
+        result.GetOptProperty('debug').push('ERROR in getAllCollaboratorsPaginated: ' + String(getAllErr));
+    }
+
+    return_data = new Object();
+    return_data.SetProperty('collaborators', all_collaborators);
+    return_data.SetProperty('total_count', total_count);
+    return_data.SetProperty('offset', offset);
+    return_data.SetProperty('limit', limit);
+    return_data.SetProperty('has_more', end_index < total_count);
+
+    return return_data;
+}
+
+// === ОСНОВНОЙ КОД ОБРАБОТКИ ЗАПРОСОВ ===
+
+// Парсинг параметров запроса
+result = new Object();
+result.SetProperty('structure', []);
+result.SetProperty('filtered_collaborators', []);
+result.SetProperty('debug', []);
+
+letter_param = Request.QueryString.GetOptProperty('letter', '');
+search_param = Request.QueryString.GetOptProperty('search', '');
+org_id = Request.QueryString.GetOptProperty('org_id', '');
+subdivision_id = Request.QueryString.GetOptProperty('subdivision_id', '');
+grouped_items_param = Request.QueryString.GetOptProperty('grouped_items', '');
+
+letter_param = StrReplace(letter_param, "'", "''");
+search_param = StrReplace(search_param, "'", "''");
+org_id = StrReplace(org_id, "'", "''");
+subdivision_id = StrReplace(subdivision_id, "'", "''");
+
+result.GetOptProperty('debug').push('Parameters: letter=' + letter_param + ', search=' + search_param + ', org_id=' + org_id + ', subdivision_id=' + subdivision_id);
+result.GetOptProperty('debug').push('subNameMap entries: ' + ArrayCount(subNameMap));
+
+// === ОБРАБОТКА GROUPED ПОДРАЗДЕЛЕНИЙ ===
+if (subdivision_id != '' && StrBegins(subdivision_id, 'grouped_')) {
+    if (grouped_items_param == '') {
+        result.SetProperty('error', 'grouped_items parameter required');
+        Response.Write(tools.object_to_text(result, 'json'));
+    } else {
+        grouped_ids = splitByComma(grouped_items_param);
+        result.GetOptProperty('debug').push('Detail grouped param raw=' + grouped_items_param + ', split count=' + ArrayCount(grouped_ids));
+
+        for (i = 0; i < ArrayCount(grouped_ids); i++) {
+            result.GetOptProperty('debug').push('Detail dept loop #' + i + ': dept_id=' + grouped_ids[i] + ' (int=' + OptInt(grouped_ids[i]) + ')');
+        }
+
+        regional_groups = [];
+        all_children_map = new Object();
+
+        // Загружаем ВСЕ подразделения один раз
+        all_descendants_query = "for $elem in subdivisions where $elem/is_disbanded != true() return $elem";
+        all_subs = ArraySelectAll(tools.xquery(all_descendants_query));
+        result.GetOptProperty('debug').push('Grouped all_subs total count=' + ArrayCount(all_subs));
+
+        // Функция для проверки является ли sub потомком dept_id
+        function isDescendantOf(sub, ancestor_id, all_subdivisions, depth) {
+            if (depth > 20) return false;
+            if (String(sub.parent_object_id) == ancestor_id) return true;
+            if (sub.parent_object_id == '' || sub.parent_object_id == null) return false;
+
+            for (parent_sub in all_subdivisions) {
+                if (String(parent_sub.id) == String(sub.parent_object_id)) {
+                    return isDescendantOf(parent_sub, ancestor_id, all_subdivisions, depth + 1);
+                }
+            }
+            return false;
+        }
+
+        global_normalized_map = new Object(); // Глобальная карта для группировки детей из ВСЕХ dept_id
+
+        for (i = 0; i < ArrayCount(grouped_ids); i++) {
+            dept_id = grouped_ids[i];
+            if (dept_id == '') continue;
+
+            try {
+                dept_query = "for $elem in subdivisions where $elem/id = " + dept_id + " return $elem";
+                dept_result = ArraySelectAll(tools.xquery(dept_query));
+                if (ArrayCount(dept_result) == 0) {
+                    result.GetOptProperty('debug').push('Grouped dept_id=' + dept_id + ' NOT FOUND');
+                    continue;
+                }
+
+                dept_info = dept_result[0];
+
+                // Используем вспомогательную функцию для поиска territorial родителя
+                territorial_result = findTerritorialParent(dept_id, 10);
+                regional_name = territorial_result.name;
+                regional_parent_id_str = territorial_result.id;
+
+                if (regional_name == '') {
+                    regional_name = 'Неизвестное подразделение';
+                }
+
+                // Ищем всех потомков текущего dept_id и СРАЗУ ДОБАВЛЯЕМ В ГЛОБАЛЬНУЮ КАРТУ
+                for (sub in all_subs) {
+                    if (!sub.id || sub.id == '') continue;
+                    if (String(sub.id) == dept_id) continue;
+
+                    try {
+                        if (isDescendantOf(sub, dept_id, all_subs, 0)) {
+                            // Проверяем сотрудников В ПОДРАЗДЕЛЕНИИ ИЛИ В ЕГО ДЕТЯХ
+                            has_collab = hasCollaboratorsRecursive(String(sub.id), 0);
+                            has_children_with_collab = hasSubdivisionsWithCollaborators(String(sub.id));
+
+                            // Пропускаем только если НЕТ сотрудников И НЕТ детей с сотрудниками
+                            if (!has_collab && !has_children_with_collab) {
+                                result.GetOptProperty('debug').push('Skip ' + String(sub.id) + ': no collab and no children with collab');
+                                continue;
+                            }
+
+                            sub_id_str = String(sub.id);
+
+                            // Получаем имя и очищаем от точек
+                            childName = getSubNameById(sub_id_str);
+                            if (childName == null) {
+                                childName = String(sub.name);
+                            }
+
+                            // Очищаем от точек ДЛЯ ОТОБРАЖЕНИЯ
+                            clean_name = childName;
+                            while (StrContains(clean_name, '.', false)) {
+                                clean_name = StrReplace(clean_name, '.', '');
+                            }
+                            clean_name = Trim(clean_name);
+
+                            // НОРМАЛИЗУЕМ очищенное имя
+                            normalized_name = normalizeSubdivisionName(clean_name);
+
+                            result.GetOptProperty('debug').push('Child: id=' + sub_id_str + ', original="' + childName + '", clean="' + clean_name + '", normalized="' + normalized_name + '"');
+
+                            // Создаем/обновляем группу в ГЛОБАЛЬНОЙ карте
+                            if (!global_normalized_map.HasProperty(normalized_name)) {
+                                group_obj = new Object();
+                                group_obj.SetProperty('display_name', clean_name); // Первое встреченное ЧИСТОЕ имя
+                                group_obj.SetProperty('ids', []);
+                                group_obj.SetProperty('org_id', String(sub.org_id));
+                                group_obj.SetProperty('parent_object_id', String(sub.parent_object_id));
+                                group_obj.SetProperty('regional_parent_name', regional_name);
+                                group_obj.SetProperty('has_children', false);
+                                global_normalized_map.SetProperty(normalized_name, group_obj);
+                            }
+
+                            // Добавляем ID в группу
+                            global_normalized_map.GetOptProperty(normalized_name).ids.push(sub_id_str);
+
+                            // Проверяем дочерние подразделения
+                            if (hasSubdivisionsWithCollaborators(sub_id_str)) {
+                                global_normalized_map.GetOptProperty(normalized_name).SetProperty('has_children', true);
+                            }
+                        }
+                    } catch(descErr) {
+                        result.GetOptProperty('debug').push('Error checking descendant: ' + String(descErr));
+                    }
+                }
+
+                // Собираем сотрудников родительского dept (это для regional_groups)
+                func_manager_id = '';
+                try {
+                    func_manager_id = getFuncManagerForSubdivision(dept_id);
+                } catch(fmErr) {}
+
+                col_query = "for $elem in collaborators where $elem/position_parent_id = " + dept_id + " and $elem/is_dismiss = false() return $elem";
+                col_list = ArraySelectAll(tools.xquery(col_query));
+
+                collaborators_array = [];
+
+                if (func_manager_id != '') {
+                    try {
+                        func_manager_full_query = "for $elem in collaborators where $elem/id = " + func_manager_id + " and $elem/is_dismiss = false() return $elem";
+                        func_manager_data_result = ArraySelectAll(tools.xquery(func_manager_full_query));
+
+                        if (ArrayCount(func_manager_data_result) > 0) {
+                            fm_elem = func_manager_data_result[0];
+                            is_birthday_fm = checkBirthday(fm_elem.birth_date);
+                            is_on_vacation_fm = (String(fm_elem.current_state) == 'Отпуск');
+
+                            fm_data = new Object();
+                            fm_data.SetProperty('id', String(fm_elem.id));
+                            fm_data.SetProperty('name', String(fm_elem.fullname));
+                            fm_data.SetProperty('name_lower', StrLowerCase(String(fm_elem.fullname)));
+                            fm_data.SetProperty('subdivision_id', String(fm_elem.position_parent_id));
+                            fm_data.SetProperty('subdivision_name', regional_name);
+                            fm_data.SetProperty('email', String(fm_elem.email != null ? fm_elem.email : '—'));
+                            fm_data.SetProperty('pict_url', String(fm_elem.pict_url != null ? fm_elem.pict_url : ''));
+                            fm_data.SetProperty('position_name', String(fm_elem.position_name != null ? fm_elem.position_name : '—'));
+                            fm_data.SetProperty('mobile_phone', String(fm_elem.mobile_phone != null ? fm_elem.mobile_phone : '—'));
+                            fm_data.SetProperty('phone', String(fm_elem.phone != null ? fm_elem.phone : '—'));
+                            fm_data.SetProperty('is_birthday', is_birthday_fm);
+                            fm_data.SetProperty('is_on_vacation', is_on_vacation_fm);
+                            fm_data.SetProperty('is_func_manager', true);
+
+                            collaborators_array.push(fm_data);
+                        }
+                    } catch(fmErr) {}
+                }
+
+                for (col_elem in col_list) {
+                    try {
+                        if (!col_elem.id || col_elem.id == '') continue;
+                        if (func_manager_id != '' && String(col_elem.id) == func_manager_id) continue;
+
+                        is_birthday = checkBirthday(col_elem.birth_date);
+                        is_on_vacation = (String(col_elem.current_state) == 'Отпуск');
+
+                        col_data = new Object();
+                        col_data.SetProperty('id', String(col_elem.id));
+                        col_data.SetProperty('name', String(col_elem.fullname));
+                        col_data.SetProperty('name_lower', StrLowerCase(String(col_elem.fullname)));
+                        col_data.SetProperty('subdivision_id', String(col_elem.position_parent_id));
+                        col_data.SetProperty('subdivision_name', regional_name);
+                        col_data.SetProperty('email', String(col_elem.email != null ? col_elem.email : '—'));
+                        col_data.SetProperty('pict_url', String(col_elem.pict_url != null ? col_elem.pict_url : ''));
+                        col_data.SetProperty('position_name', String(col_elem.position_name != null ? col_elem.position_name : '—'));
+                        col_data.SetProperty('mobile_phone', String(col_elem.mobile_phone != null ? col_elem.mobile_phone : '—'));
+                        col_data.SetProperty('phone', String(col_elem.phone != null ? col_elem.phone : '—'));
+                        col_data.SetProperty('is_birthday', is_birthday);
+                        col_data.SetProperty('is_on_vacation', is_on_vacation);
+                        col_data.SetProperty('is_func_manager', false);
+
+                        collaborators_array.push(col_data);
+                    } catch(colErr) {}
+                }
+
+                regional_group = new Object();
+                regional_group.SetProperty('regional_name', regional_name);
+                regional_group.SetProperty('collaborators', collaborators_array);
+                regional_groups.push(regional_group);
+
+            } catch(deptErr) {
+                result.GetOptProperty('debug').push('Error processing dept_id=' + dept_id + ': ' + String(deptErr));
+            }
+        }
+
+        result.GetOptProperty('debug').push('=== CREATING FINAL CHILDREN FROM GLOBAL MAP ===');
+
+        for (norm_key in global_normalized_map) {
+            try {
+                group_info = global_normalized_map.GetOptProperty(norm_key);
+                group_ids = group_info.ids;
+
+                result.GetOptProperty('debug').push('Group "' + group_info.display_name + '": ' + ArrayCount(group_ids) + ' items');
+
+                // Если несколько ID - создаем grouped элемент
+                if (ArrayCount(group_ids) > 1) {
+                    grouped_ids_str = '';
+                    for (j = 0; j < ArrayCount(group_ids); j++) {
+                        if (j > 0) grouped_ids_str = grouped_ids_str + ',';
+                        grouped_ids_str = grouped_ids_str + group_ids[j];
+                    }
+
+                    unique_key = 'grouped_' + norm_key;
+
+                    child_data = new Object();
+                    child_data.SetProperty('id', unique_key);
+                    child_data.SetProperty('name', group_info.display_name);
+                    child_data.SetProperty('type', 'grouped');
+                    child_data.SetProperty('is_grouped', true);
+                    child_data.SetProperty('group_count', ArrayCount(group_ids));
+                    child_data.SetProperty('org_id', group_info.org_id);
+                    child_data.SetProperty('parent_object_id', group_info.parent_object_id);
+                    child_data.SetProperty('regional_parent_name', group_info.regional_parent_name);
+                    child_data.SetProperty('has_subdivisions', group_info.has_children);
+                    child_data.SetProperty('grouped_items_str', grouped_ids_str);
+                    child_data.SetProperty('children', []);
+                    child_data.SetProperty('collaborators', []);
+
+                    all_children_map.SetProperty(unique_key, child_data);
+
+                    result.GetOptProperty('debug').push('✓ CREATED GROUPED: "' + group_info.display_name + '" with ' + ArrayCount(group_ids) + ' items, org_id=' + group_info.org_id);
+
+                } else if (ArrayCount(group_ids) == 1) {
+                    // Одно подразделение - обычный элемент
+                    single_id = group_ids[0];
+
+                    child_data = new Object();
+                    child_data.SetProperty('id', single_id);
+                    child_data.SetProperty('name', group_info.display_name);
+                    child_data.SetProperty('org_id', group_info.org_id);
+                    child_data.SetProperty('parent_object_id', group_info.parent_object_id);
+                    child_data.SetProperty('regional_parent_name', group_info.regional_parent_name);
+                    child_data.SetProperty('has_subdivisions', group_info.has_children);
+                    child_data.SetProperty('children', []);
+                    child_data.SetProperty('collaborators', []);
+
+                    all_children_map.SetProperty(single_id, child_data);
+
+                    result.GetOptProperty('debug').push('✓ Added single: "' + group_info.display_name + '", org_id=' + group_info.org_id);
+                }
+            } catch(finalErr) {
+                result.GetOptProperty('debug').push('ERROR creating final child: ' + String(finalErr));
+            }
+        }
+
+        // Конвертируем map в массив
+        all_children_array = [];
+        for (child_key in all_children_map) {
+            all_children_array.push(all_children_map.GetOptProperty(child_key));
+        }
+
+        result.GetOptProperty('debug').push('Final all_children_array count=' + ArrayCount(all_children_array));
+
+        regional_groups = ArraySort(regional_groups, 'regional_name', '+');
+
+        subdivision_data = new Object();
+        subdivision_data.SetProperty('id', subdivision_id);
+        subdivision_data.SetProperty('hierarchy_path', []);
+        subdivision_data.SetProperty('children', all_children_array);
+        subdivision_data.SetProperty('regional_groups', regional_groups);
+        subdivision_data.SetProperty('collaborators', []);
+        subdivision_data.SetProperty('has_subdivisions', ArrayCount(all_children_array) > 0);
+
+        // ОБРАБОТКА ПАГИНАЦИИ ДЛЯ GROUPED
+        include_all_param = Request.QueryString.GetOptProperty('include_all_collaborators', '');
+        offset_param = OptInt(Request.QueryString.GetOptProperty('offset', '0'));
+        limit_param = OptInt(Request.QueryString.GetOptProperty('limit', '20'));
+
+        if (include_all_param == 'true') {
+            // Здесь будет большой блок кода для загрузки сотрудников...
+            // Продолжение в следующем блоке из-за ограничения размера
+            result.SetProperty('subdivision', subdivision_data);
+        } else {
+            subdivision_data.SetProperty('all_collaborators', []);
+            subdivision_data.SetProperty('total_count', 0);
+            subdivision_data.SetProperty('has_more', false);
+            result.SetProperty('subdivision', subdivision_data);
+        }
+
+        Response.Write(tools.object_to_text(result, 'json'));
+    }
+}
+
 // === КОНЕЦ ПЕРВОЙ ЧАСТИ (ФУНКЦИИ-УТИЛИТЫ) ===
 %>
